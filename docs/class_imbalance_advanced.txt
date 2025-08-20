@@ -1,0 +1,19 @@
+# Advanced Research on Class Imbalance
+
+Recent work explores deep learning and generative models for class imbalance.
+
+## Deep Learning Solutions
+- Data augmentation with GANs (Generative Adversarial Networks).
+- Variational Autoencoders for synthetic data generation.
+- Transfer learning: Use pre-trained models on balanced datasets, then fine-tune.
+
+## Evaluation Metrics for Imbalanced Data
+- Precision, Recall, F1-score
+- AUC-ROC and AUC-PR (more reliable for imbalance)
+- G-Mean (balances sensitivity and specificity)
+- Matthews Correlation Coefficient (MCC)
+
+## Emerging Trends
+- Few-shot learning for extreme imbalance
+- Federated learning with imbalanced local datasets
+- Handling multi-class imbalance, not just binary

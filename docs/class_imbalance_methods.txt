@@ -1,0 +1,19 @@
+# Techniques for Handling Class Imbalance
+
+## 1. Data-Level Approaches
+- Random Oversampling: Duplicate minority samples.
+- Random Undersampling: Remove majority samples.
+- SMOTE (Synthetic Minority Oversampling Technique): Create synthetic samples of the minority class.
+- ADASYN: Adaptive variant of SMOTE that focuses on harder-to-learn minority samples.
+
+## 2. Algorithm-Level Approaches
+- Class weights: Assign higher penalties for misclassifying minority samples.
+- Cost-sensitive learning: Modify the loss function to prioritize minority classes.
+
+## 3. Ensemble Methods
+- Balanced Random Forest
+- EasyEnsemble
+- Boosting with sampling strategies
+
+## 4. Hybrid Approaches
+Combine resampling + cost-sensitive learning.
