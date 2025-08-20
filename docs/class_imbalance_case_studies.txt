@@ -1,0 +1,13 @@
+# Case Studies in Class Imbalance
+1. **Fraud Detection**
+- Dataset: Credit card transactions
+- Techniques used: SMOTE + XGBoost with class weights
+- Outcome: 35% higher recall for fraud cases.
+2. **Medical Diagnosis**
+- Dataset: Rare cancer detection
+- Techniques: GAN-based data augmentation + CNN classifier
+- Outcome: Improved AUC from 0.74 → 0.89
+3. **Network Intrusion Detection**
+- Problem: Minority attack types underrepresented
+- Solution: Ensemble methods (EasyEnsemble, BalancedBagging)
+- Outcome: Significant performance boost on minority attack detection.

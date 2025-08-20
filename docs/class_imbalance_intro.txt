@@ -1,0 +1,15 @@
+# Introduction to Class Imbalance in Machine Learning
+
+Class imbalance occurs when certain classes in a dataset are significantly underrepresented compared to others. 
+For example, in fraud detection, only ~1% of transactions may be fraudulent while 99% are normal. 
+This imbalance creates challenges for machine learning models, as they tend to be biased toward the majority class.
+
+## Key Issues
+- Poor recall for minority classes
+- High accuracy but misleading results
+- Difficulty in learning rare but critical patterns
+
+## Real-World Examples
+- Fraud detection (fraudulent transactions vs. legitimate)
+- Medical diagnosis (rare diseases vs. healthy patients)
+- Fault detection in engineering systems
