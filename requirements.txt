@@ -6,3 +6,10 @@ langchain-groq>=0.1.5
 sentence-transformers>=3.0.1
 torch
 python-dotenv
+pymupdf
+rank-bm25
+pytesseract
+pillow
+fastapi
+uvicorn
+requests
