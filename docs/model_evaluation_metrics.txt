@@ -1,0 +1,100 @@
+Model Evaluation Metrics Guide
+================================
+
+Evaluating machine learning models requires a comprehensive set of metrics beyond simple accuracy. This guide covers the most important metrics used in classification, regression, ranking, and language model evaluation.
+
+1. Confusion Matrix
+--------------------
+A confusion matrix is a table that summarizes the performance of a classification model by showing counts of True Positives (TP), True Negatives (TN), False Positives (FP), and False Negatives (FN).
+
+- True Positive (TP): Model correctly predicts the positive class.
+- True Negative (TN): Model correctly predicts the negative class.
+- False Positive (FP): Model incorrectly predicts positive (Type I error).
+- False Negative (FN): Model incorrectly predicts negative (Type II error).
+
+2. Accuracy
+------------
+Accuracy = (TP + TN) / (TP + TN + FP + FN)
+Accuracy measures the proportion of correct predictions. It is misleading on imbalanced datasets where the majority class dominates predictions.
+
+3. Precision
+-------------
+Precision = TP / (TP + FP)
+Precision measures what proportion of positive predictions were actually correct. High precision is important when false positives are costly (e.g., spam detection, fraud detection).
+
+4. Recall (Sensitivity)
+------------------------
+Recall = TP / (TP + FN)
+Recall measures what proportion of actual positives were correctly identified. High recall is critical when false negatives are costly (e.g., cancer screening, safety systems).
+
+5. F1 Score
+------------
+F1 = 2 * (Precision * Recall) / (Precision + Recall)
+The F1 Score is the harmonic mean of Precision and Recall. It balances both metrics and is preferred for imbalanced datasets over accuracy.
+
+6. F-Beta Score
+----------------
+F-Beta = (1 + beta^2) * (Precision * Recall) / (beta^2 * Precision + Recall)
+The F-Beta score generalizes the F1 score by weighting recall beta times more than precision. Beta=2 emphasizes recall; Beta=0.5 emphasizes precision.
+
+7. ROC Curve and AUC-ROC
+--------------------------
+The Receiver Operating Characteristic (ROC) curve plots the True Positive Rate (Recall) against the False Positive Rate at various classification thresholds. AUC-ROC (Area Under the Curve) summarizes the ROC curve as a single scalar. A value of 1.0 indicates a perfect classifier; 0.5 indicates random guessing.
+
+8. Precision-Recall Curve and AUC-PR
+--------------------------------------
+The Precision-Recall curve is more informative than ROC for heavily imbalanced datasets. AUC-PR measures the area under this curve. A high AUC-PR indicates a model that maintains precision even as recall increases.
+
+9. Mean Absolute Error (MAE)
+------------------------------
+MAE = mean(|y_true - y_pred|)
+Used for regression tasks. MAE measures the average absolute difference between predicted and actual values. It is robust to outliers compared to MSE.
+
+10. Mean Squared Error (MSE) and RMSE
+---------------------------------------
+MSE = mean((y_true - y_pred)^2)
+RMSE = sqrt(MSE)
+MSE penalizes large errors more heavily due to squaring. RMSE is in the same units as the target variable, making it more interpretable.
+
+11. R-Squared (Coefficient of Determination)
+---------------------------------------------
+R^2 = 1 - (SS_res / SS_tot)
+R-squared measures the proportion of variance in the target variable explained by the model. A value of 1.0 means the model explains all variance; 0.0 means it explains none.
+
+12. Log Loss (Binary Cross-Entropy)
+-------------------------------------
+Log Loss = -mean(y * log(p) + (1-y) * log(1-p))
+Log loss measures the uncertainty of probabilistic predictions. Lower log loss indicates more confident and correct predictions.
+
+13. BLEU Score (Bilingual Evaluation Understudy)
+--------------------------------------------------
+BLEU measures the overlap of n-grams between generated text and reference text. It is widely used in machine translation and text generation evaluation. BLEU-1 measures unigram overlap; BLEU-4 measures up to 4-gram overlap. BLEU scores range from 0 to 1.
+
+14. ROUGE Score (Recall-Oriented Understudy for Gisting Evaluation)
+--------------------------------------------------------------------
+ROUGE measures recall of n-grams between generated and reference summaries.
+- ROUGE-1: Unigram recall overlap.
+- ROUGE-2: Bigram recall overlap.
+- ROUGE-L: Longest common subsequence overlap.
+ROUGE is widely used in summarization and RAG evaluation.
+
+15. MRR (Mean Reciprocal Rank)
+--------------------------------
+MRR = mean(1 / rank_of_first_relevant_result)
+MRR measures the quality of ranked retrieval results by averaging the reciprocal of the rank at which the first relevant document appears. Used in information retrieval and RAG evaluation.
+
+16. NDCG (Normalized Discounted Cumulative Gain)
+-------------------------------------------------
+NDCG measures ranking quality by weighting highly relevant documents that appear early in the ranking more heavily. It accounts for graded relevance rather than binary relevant/not-relevant. NDCG scores range from 0 to 1.
+
+17. Faithfulness (LLM-as-a-Judge)
+-----------------------------------
+Faithfulness measures the proportion of claims in a generated answer that are verifiably supported by the retrieved context. A score of 1.0 means every claim in the answer is grounded in the context. Used in RAG evaluation pipelines.
+
+18. Answer Relevance (LLM-as-a-Judge)
+---------------------------------------
+Answer relevance measures how directly the generated answer addresses the user's original question, regardless of the retrieved context. Low relevance indicates topic drift or off-topic responses.
+
+19. Context Precision (LLM-as-a-Judge)
+----------------------------------------
+Context precision measures what proportion of the retrieved context chunks were actually useful for generating the answer. Low context precision indicates the retriever is returning too much noise.

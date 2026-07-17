@@ -20,6 +20,11 @@ Features:
 """
 
 import os
+os.environ["OMP_NUM_THREADS"] = "1"
+os.environ["MKL_NUM_THREADS"] = "1"
+os.environ["PYTORCH_ALLOC_CONF"] = "max_split_size_mb:32"
+import json
+from typing import List, Optional, Dict
 import io
 import re
 import math
@@ -29,7 +34,7 @@ import fitz  # PyMuPDF
 from PIL import Image
 import pytesseract
 from dotenv import load_dotenv
-from langchain_community.embeddings import HuggingFaceEmbeddings
+from langchain_community.embeddings import FastEmbedEmbeddings
 from langchain_community.vectorstores import Chroma
 from langchain_community.retrievers import BM25Retriever
 from langchain.retrievers import EnsembleRetriever
@@ -48,7 +53,7 @@ USER_DB_PATH = "./users.db"
 # -------------------------
 def init_user_db():
     """
-    Initializes the local SQLite database for user accounts.
+    Initializes the local SQLite database and associated tables.
     """
     conn = sqlite3.connect(USER_DB_PATH)
     cursor = conn.cursor()
@@ -56,11 +61,60 @@ def init_user_db():
         CREATE TABLE IF NOT EXISTS users (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             username TEXT UNIQUE NOT NULL,
-            password_hash TEXT NOT NULL
+            password_hash TEXT NOT NULL,
+            role TEXT DEFAULT 'readonly'
+        )
+    """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS chat_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT NOT NULL,
+            session_id TEXT NOT NULL,
+            role TEXT NOT NULL,
+            content TEXT NOT NULL,
+            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS feedback (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT NOT NULL,
+            message_id TEXT NOT NULL,
+            rating INTEGER NOT NULL,
+            feedback_text TEXT,
+            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS token_usage (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT NOT NULL,
+            query TEXT NOT NULL,
+            prompt_tokens INTEGER NOT NULL,
+            completion_tokens INTEGER NOT NULL,
+            total_tokens INTEGER NOT NULL,
+            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS embedding_cache (
+            text_hash TEXT PRIMARY KEY,
+            vector_json TEXT NOT NULL,
+            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
         )
     """)
     conn.commit()
     conn.close()
+
+
+def validate_password_strength(password: str) -> bool:
+    if len(password) < 8:
+        return False
+    if not any(c.isdigit() for c in password):
+        return False
+    if not any(c.isupper() for c in password):
+        return False
+    return True
 
 
 def hash_password(password: str) -> str:
@@ -70,16 +124,18 @@ def hash_password(password: str) -> str:
     return hashlib.sha256(password.encode("utf-8")).hexdigest()
 
 
-def create_user(username: str, password: str) -> bool:
+def create_user(username: str, password: str, role: str = "readonly") -> bool:
     """
-    Registers a new user. Returns True if successful, False if username exists.
+    Registers a new user. Returns True if successful, False if username exists or password is weak.
     """
     init_user_db()
+    if not validate_password_strength(password):
+        return False
     h = hash_password(password)
     try:
         conn = sqlite3.connect(USER_DB_PATH)
         cursor = conn.cursor()
-        cursor.execute("INSERT INTO users (username, password_hash) VALUES (?, ?)", (username, h))
+        cursor.execute("INSERT INTO users (username, password_hash, role) VALUES (?, ?, ?)", (username, h, role))
         conn.commit()
         conn.close()
         return True
@@ -104,47 +160,237 @@ def verify_user(username: str, password: str) -> bool:
 
 
 # -------------------------
+# -------------------------
+# Cryptography (AES-256 Fernet Encryption)
+# -------------------------
+from cryptography.fernet import Fernet
+import uuid
+import time
+from qdrant_client import QdrantClient
+from qdrant_client.http import models
+
+FERNET_KEY = os.getenv("FERNET_KEY")
+if not FERNET_KEY:
+    import base64
+    import hashlib
+    # Stable fallback key for zero-cost local environment
+    FERNET_KEY = base64.urlsafe_b64encode(hashlib.sha256(b"SecurePayloadEncryptionKey123456789").digest())
+    
+def encrypt_text(text: str) -> str:
+    f = Fernet(FERNET_KEY)
+    return f.encrypt(text.encode("utf-8")).decode("utf-8")
+
+def decrypt_text(cipher_text: str) -> str:
+    f = Fernet(FERNET_KEY)
+    return f.decrypt(cipher_text.encode("utf-8")).decode("utf-8")
+
+
+# -------------------------
+# Local Embedding Cache
+# -------------------------
+def check_embedding_cache(text: str) -> Optional[List[float]]:
+    text_hash = hashlib.sha256(text.encode("utf-8")).hexdigest()
+    try:
+        conn = sqlite3.connect(USER_DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute("SELECT vector_json FROM embedding_cache WHERE text_hash = ?", (text_hash,))
+        row = cursor.fetchone()
+        conn.close()
+        if row:
+            return json.loads(row[0])
+    except Exception:
+        pass
+    return None
+
+def save_embedding_cache(text: str, vector: List[float]):
+    text_hash = hashlib.sha256(text.encode("utf-8")).hexdigest()
+    vector_json = json.dumps(vector)
+    try:
+        conn = sqlite3.connect(USER_DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute("INSERT OR REPLACE INTO embedding_cache (text_hash, vector_json) VALUES (?, ?)", (text_hash, vector_json))
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
+
+class CachedHuggingFaceEmbeddings:
+    def __init__(self, embedder):
+        self.embedder = embedder
+        
+    def embed_documents(self, texts: List[str]) -> List[List[float]]:
+        results = []
+        texts_to_embed = []
+        indices_to_embed = []
+        
+        for idx, text in enumerate(texts):
+            cached = check_embedding_cache(text)
+            if cached:
+                results.append(cached)
+            else:
+                results.append(None)
+                texts_to_embed.append(text)
+                indices_to_embed.append(idx)
+                
+        if texts_to_embed:
+            embedded = self.embedder.embed_documents(texts_to_embed)
+            for idx, vector in zip(indices_to_embed, embedded):
+                save_embedding_cache(texts[idx], vector)
+                results[idx] = vector
+                
+        return results
+
+    def embed_query(self, query: str) -> List[float]:
+        cached = check_embedding_cache(query)
+        if cached:
+            return cached
+        vector = self.embedder.embed_query(query)
+        save_embedding_cache(query, vector)
+        return vector
+
+
+# -------------------------
+# Local Qdrant Connector
+# -------------------------
+def get_qdrant_client():
+    return QdrantClient(path="./qdrant_db")
+
+def init_qdrant_collections(client):
+    collections = ["research_papers", "query_cache"]
+    for cname in collections:
+        try:
+            client.get_collection(collection_name=cname)
+        except Exception:
+            client.create_collection(
+                collection_name=cname,
+                vectors_config=models.VectorParams(size=384, distance=models.Distance.COSINE),
+                quantization_config=models.ScalarQuantization(
+                    scalar=models.ScalarQuantizationConfig(
+                        type=models.ScalarType.INT8,
+                        always_ram=True
+                    )
+                )
+            )
+            client.create_payload_index(
+                collection_name=cname,
+                field_name="user_id",
+                field_schema=models.PayloadSchemaType.KEYWORD
+            )
+            client.create_payload_index(
+                collection_name=cname,
+                field_name="title",
+                field_schema=models.PayloadSchemaType.KEYWORD
+            )
+
+
+# -------------------------
 # Local Semantic Query Cache
 # -------------------------
-def get_cache_collection(embedder, persist_dir="./research_db"):
-    """
-    Returns a Chroma collection dedicated to caching query-response pairs.
-    """
-    return Chroma(
-        collection_name="query_cache",
-        embedding_function=embedder,
-        persist_directory=persist_dir
-    )
-
-
-def check_semantic_cache(query: str, cache_collection, score_threshold=0.90):
-    """
-    Checks the semantic cache for a highly similar query.
-    Returns: (cached_answer, similarity_score) or (None, 0.0)
-    """
+def check_semantic_cache(client, query: str, embedder, score_threshold=0.90, ttl_days=7):
+    cached_embedder = CachedHuggingFaceEmbeddings(embedder)
+    query_vector = cached_embedder.embed_query(query)
     try:
-        results = cache_collection.similarity_search_with_score(query, k=1)
-        if results:
-            doc, score = results[0]
-            similarity = 1 - score  # Convert Chroma distance to cosine similarity
+        res = client.query_points(
+            collection_name="query_cache",
+            query=query_vector,
+            limit=1
+        )
+        if res.points:
+            pt = res.points[0]
+            similarity = pt.score
             if similarity >= score_threshold:
-                return doc.page_content, similarity
+                payload = pt.payload
+                entry_time = payload.get("timestamp", 0)
+                if time.time() - entry_time > ttl_days * 24 * 3600:
+                    client.delete(collection_name="query_cache", points_selector=[pt.id])
+                    return None, 0.0
+                return payload["response"], similarity
     except Exception:
         pass
     return None, 0.0
 
-
-def save_to_semantic_cache(query: str, answer: str, cache_collection):
-    """
-    Caches the generated answer for a query.
-    """
+def save_to_semantic_cache(client, query: str, response: str, source_files: List[str], embedder):
+    cached_embedder = CachedHuggingFaceEmbeddings(embedder)
+    vector = cached_embedder.embed_query(query)
+    point_id = str(uuid.uuid5(uuid.NAMESPACE_DNS, f"cache_{query}"))
     try:
-        cache_collection.add_texts(
-            texts=[answer],
-            metadatas=[{"query": query}]
+        client.upsert(
+            collection_name="query_cache",
+            points=[models.PointStruct(
+                id=point_id,
+                vector=vector,
+                payload={
+                    "query": query,
+                    "response": response,
+                    "source_files": ",".join(source_files),
+                    "timestamp": time.time()
+                }
+            )]
         )
     except Exception:
         pass
+
+def invalidate_semantic_cache_by_file(client, filename: str):
+    try:
+        results = client.scroll(
+            collection_name="query_cache",
+            limit=1000,
+            with_payload=True
+        )
+        if results and results[0]:
+            points_to_delete = []
+            for item in results[0]:
+                source_files = item.payload.get("source_files", "").split(",")
+                if filename in source_files:
+                    points_to_delete.append(item.id)
+            if points_to_delete:
+                client.delete(collection_name="query_cache", points_selector=points_to_delete)
+    except Exception:
+        pass
+
+
+def delete_file_from_qdrant(client, filename: str, username: str):
+    try:
+        client.delete(
+            collection_name="research_papers",
+            points_selector=models.Filter(
+                must=[
+                    models.FieldCondition(key="title", match=models.MatchValue(value=filename)),
+                    models.FieldCondition(key="user_id", match=models.MatchValue(value=username))
+                ]
+            )
+        )
+    except Exception:
+        pass
+
+
+def add_chunks_to_qdrant(client, chunks: list, username: str, embedder):
+    cached_embedder = CachedHuggingFaceEmbeddings(embedder)
+    texts = [c["content"] for c in chunks]
+    embeddings = cached_embedder.embed_documents(texts)
+    points = []
+    for idx, c in enumerate(chunks):
+        point_id = str(uuid.uuid5(uuid.NAMESPACE_DNS, f"{username}_{c['title']}_sent_{c['sent_index']}"))
+        enc_content = encrypt_text(c["content"])
+        enc_parent = encrypt_text(c["parent_text"])
+        enc_overlap = encrypt_text(c["overlap_text"])
+        points.append(models.PointStruct(
+            id=point_id,
+            vector=embeddings[idx],
+            payload={
+                "content": enc_content,
+                "parent_text": enc_parent,
+                "overlap_text": enc_overlap,
+                "title": c["title"],
+                "sent_index": c["sent_index"],
+                "user_id": username
+            }
+        ))
+    client.upsert(
+        collection_name="research_papers",
+        points=points
+    )
 
 
 # -------------------------
@@ -154,21 +400,7 @@ def make_embedder():
     """
     Creates a sentence transformer model to convert text into embeddings.
     """
-    return HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
-
-
-# -------------------------
-# Database Preparation
-# -------------------------
-def get_collection(embedder, persist_dir="./research_db"):
-    """
-    Returns a Chroma vector store collection.
-    """
-    return Chroma(
-        collection_name="research_papers",
-        embedding_function=embedder,
-        persist_directory=persist_dir
-    )
+    return FastEmbedEmbeddings(model_name="BAAI/bge-small-en-v1.5")
 
 
 # -------------------------
@@ -368,7 +600,7 @@ def generate_metadata_filter(query: str, llm, unique_files: list):
         selected_file = response.content.strip()
         selected_file = selected_file.replace("'", "").replace('"', "")
         if selected_file in unique_files:
-            return {"title": selected_file}
+            return selected_file
     except Exception:
         pass
     return None
@@ -628,6 +860,30 @@ def semantic_chunk_text(content: str, title: str, embedder, distance_threshold=0
     return chunks
 
 
+def parent_child_chunking(content: str, filename: str, embedder) -> list:
+    """
+    Splits document content into semantic parents (paragraphs) and child chunks (sentences).
+    """
+    parents = semantic_chunk_text(content, filename, embedder)
+    chunks = []
+    for parent_idx, parent in enumerate(parents):
+        parent_text = parent["content"]
+        sentences = split_into_sentences(parent_text)
+        overlap_size = 1
+        for i, sent in enumerate(sentences):
+            start = max(0, i - overlap_size)
+            end = min(len(sentences), i + overlap_size + 1)
+            window_text = " ".join(sentences[start:end])
+            chunks.append({
+                "title": filename,
+                "content": sent,
+                "parent_text": parent_text,
+                "overlap_text": window_text,
+                "sent_index": len(chunks)
+            })
+    return chunks
+
+
 # -------------------------
 # Sentence-Level Fallback Chunking Function
 # -------------------------
@@ -677,160 +933,276 @@ def rewrite_query_with_history(query: str, chat_history, llm):
 
 
 # -------------------------
-# Advanced Hybrid Retrieval
+# Advanced Hybrid Retrieval & Reranking
 # -------------------------
-def retrieve_context(query: str, collection, top_k=3, vector_weight=0.5, window_size=2, metadata_filter=None, user_id=None):
+def run_bm25_on_candidates(query: str, candidates: list, top_k=5):
     """
-    Retrieves top chunks using a hybrid Ensemble of:
-    - Dense Vector Search (Chroma) with metadata & tenant filtering
-    - Sparse Lexical Search (BM25) with metadata & tenant filtering
-    
-    Performs Sentence Window Context Expansion.
+    Builds an in-memory BM25 index on vector candidates and ranks them.
     """
-    all_docs = collection.get()
-    
-    # 1. Construct combined filter matching user_id or public system files
-    user_filter = {"user_id": "public"}
-    if user_id:
-        user_filter = {
-            "$or": [
-                {"user_id": user_id},
-                {"user_id": "public"}
-            ]
-        }
-        
-    if metadata_filter:
-        combined_filter = {
-            "$and": [
-                metadata_filter,
-                user_filter
-            ]
-        }
-    else:
-        combined_filter = user_filter
-        
-    search_kwargs = {"k": top_k * 2}
-    if combined_filter:
-        search_kwargs["filter"] = combined_filter
-        
-    vector_retriever = collection.as_retriever(search_kwargs=search_kwargs)
-    
-    # Extract similarity scores from Vector DB directly for annotation
-    vector_results = collection.similarity_search_with_score(query, k=top_k * 2, filter=combined_filter)
-    vector_scores = {doc.page_content: 1 - score for doc, score in vector_results}
-    
-    # 2. Build BM25 and build ensemble if documents exist
-    if all_docs and all_docs.get("documents"):
-        documents = [
-            Document(page_content=doc, metadata=meta)
-            for doc, meta in zip(all_docs["documents"], all_docs["metadatas"])
-        ]
-        
-        # Apply combined metadata filters to BM25 candidate pool
-        if combined_filter:
-            filtered_docs = []
-            for d in documents:
-                match = True
-                for k, v in combined_filter.items():
-                    if d.metadata.get(k) != v:
-                        match = False
-                        break
-                if match:
-                    filtered_docs.append(d)
-            documents = filtered_docs
-            
-        try:
-            if documents:
-                bm25_retriever = BM25Retriever.from_documents(documents)
-                bm25_retriever.k = top_k
-                
-                ensemble_retriever = EnsembleRetriever(
-                    retrievers=[vector_retriever, bm25_retriever],
-                    weights=[vector_weight, 1.0 - vector_weight]
-                )
-                retrieved_docs = ensemble_retriever.invoke(query)
-            else:
-                retrieved_docs = vector_retriever.invoke(query)
-        except Exception:
-            retrieved_docs = vector_retriever.invoke(query)
-    else:
-        retrieved_docs = vector_retriever.invoke(query)
-        
-    # Deduplicate candidates by page content
-    seen_content = set()
-    deduped_docs = []
-    
-    for doc in retrieved_docs:
-        content = doc.page_content
-        if content in seen_content:
-            continue
-        seen_content.add(content)
-        deduped_docs.append(doc)
-        
-    # 3. Expand retrieved sentences to context windows
-    if window_size > 0:
-        expanded_docs = retrieve_sentence_window(collection, deduped_docs, user_id=user_id, window_size=window_size)
-    else:
-        expanded_docs = deduped_docs
-        
-    # Format sources
-    sources = []
-    for doc in expanded_docs:
-        content = doc.page_content
-        orig_text = doc.metadata.get("original_sentence", content)
-        
-        similarity = vector_scores.get(orig_text, 0.5)
-        similarity = max(0.01, min(1.0, similarity))
-        
-        sources.append({
-            "title": doc.metadata.get("title", "Unknown"),
-            "content": content,
-            "similarity": similarity
-        })
-        
-    # Sort and slice
-    sources.sort(key=lambda x: x["similarity"], reverse=True)
-    return sources[:top_k * 3]  # Return candidate list for rerank
+    if not candidates:
+        return []
+    corpus = [c["content"] for c in candidates]
+    tokenized_corpus = [doc.lower().split(" ") for doc in corpus]
+    query_tokens = set(query.lower().split(" "))
+    scored_candidates = []
+    for idx, cand in enumerate(candidates):
+        cand_tokens = tokenized_corpus[idx]
+        score = sum(cand_tokens.count(tok) for tok in query_tokens if tok in cand_tokens)
+        scored_candidates.append((score, cand))
+    scored_candidates.sort(key=lambda x: x[0], reverse=True)
+    return [item[1] for item in scored_candidates][:top_k]
 
 
-if __name__ == "__main__":
-    embedder = make_embedder()
-    collection = get_collection(embedder)
+def reciprocal_rank_fusion(vector_results, bm25_results, k=60):
+    """
+    Combines vector search and BM25 candidates using Reciprocal Rank Fusion.
+    """
+    scores = {}
+    for rank, doc in enumerate(vector_results):
+        text = doc["content"]
+        if text not in scores:
+            scores[text] = {"doc": doc, "score": 0.0}
+        scores[text]["score"] += 1.0 / (k + rank + 1)
+    for rank, doc in enumerate(bm25_results):
+        text = doc["content"]
+        if text not in scores:
+            scores[text] = {"doc": doc, "score": 0.0}
+        scores[text]["score"] += 1.0 / (k + rank + 1)
+    sorted_docs = sorted(scores.values(), key=lambda x: x["score"], reverse=True)
+    return [item["doc"] for item in sorted_docs]
 
-    docs_dir = "./docs"
-    if not os.path.exists(docs_dir):
-        print("[WARNING] No docs directory found. Please add files (.txt, .pdf, .md) to ./docs")
-        exit()
 
-    print(f"Reading files from {docs_dir}...")
-    ingested_count = 0
-    for fname in os.listdir(docs_dir):
-        ext = os.path.splitext(fname)[1].lower()
-        if ext in [".txt", ".pdf", ".md"]:
-            fpath = os.path.join(docs_dir, fname)
-            print(f"Processing {fname}...")
-            try:
-                docs = load_document(fpath)
-                for doc in docs:
-                    # Ingest using semantic chunking
-                    chunks = semantic_chunk_text(doc.page_content, fname, embedder)
-                    if chunks:
-                        collection.add_texts(
-                            texts=[c["content"] for c in chunks],
-                            metadatas=[{
-                                "title": c["title"],
-                                "sent_index": c["sent_index"],
-                                "user_id": "public" # Store as public shared documents
-                            } for c in chunks],
-                            ids=[f"public_{sanitize_id_part(c['title'])}_sent_{c['sent_index']}" for c in chunks]
-                        )
-                        ingested_count += len(chunks)
-            except Exception as e:
-                print(f"Error processing {fname}: {e}")
-                
+def maximal_marginal_relevance(query: str, candidates: list, embedder, lambda_mult=0.5, top_k=3):
+    """
+    Balances relevance and query-chunk diversity using Maximal Marginal Relevance.
+    """
+    if not candidates or len(candidates) <= top_k:
+        return candidates[:top_k]
+    cached_embedder = CachedHuggingFaceEmbeddings(embedder)
+    query_vector = cached_embedder.embed_query(query)
+    texts = [c["content"] for c in candidates]
+    embeddings = cached_embedder.embed_documents(texts)
+    selected_indices = []
+    unselected_indices = list(range(len(candidates)))
+    def cos_sim(v1, v2):
+        dot = sum(a*b for a, b in zip(v1, v2))
+        norm1 = math.sqrt(sum(a*a for a in v1))
+        norm2 = math.sqrt(sum(b*b for b in v2))
+        if norm1 * norm2 == 0:
+            return 0.0
+        return dot / (norm1 * norm2)
+    first_idx = unselected_indices.pop(0)
+    selected_indices.append(first_idx)
+    while len(selected_indices) < top_k and unselected_indices:
+        best_mmr = -100.0
+        best_idx = None
+        for idx in unselected_indices:
+            sim_query = cos_sim(embeddings[idx], query_vector)
+            sim_selected = max(cos_sim(embeddings[idx], embeddings[s_idx]) for s_idx in selected_indices)
+            mmr_score = lambda_mult * sim_query - (1 - lambda_mult) * sim_selected
+            if mmr_score > best_mmr:
+                best_mmr = mmr_score
+                best_idx = idx
+        if best_idx is not None:
+            unselected_indices.remove(best_idx)
+            selected_indices.append(best_idx)
+        else:
+            break
+    return [candidates[idx] for idx in selected_indices]
+
+
+def generate_hyde_response(query: str, llm) -> str:
+    """
+    Generates a hypothetical answer paragraph using LLM (HyDE).
+    """
+    prompt = f"""
+    You are a helpful research assistant. 
+    Write a short hypothetical paragraph that directly answers the following question. 
+    Do not worry about being perfectly accurate; just write a plausible answer.
+
+    Question: {query}
+    Hypothetical Answer:
+    """
     try:
-        collection.persist()
+        response = llm.invoke(prompt)
+        text = response.content.strip()
+        if text:
+            return text
+    except Exception:
+        pass
+    return query
+
+
+def compress_context_with_llm(query: str, chunks: list, llm, top_k=3):
+    """
+    Trims retrieved context chunks to only the sentences relevant to the query.
+    """
+    compressed_chunks = []
+    for c in chunks:
+        prompt = f"""
+        You are a search precision optimizer. Given the user query and a passage, extract only the sentence(s) from the passage that directly answer the query.
+        Do NOT change the words or paraphrase. Only extract the exact matching sentences.
+        If no sentence is relevant, respond with "NONE".
+
+        Query: "{query}"
+        Passage:
+        "{c['content']}"
+
+        Extracted sentence(s):
+        """
+        try:
+            resp = llm.invoke(prompt)
+            extracted = resp.content.strip()
+            if extracted and extracted != "NONE" and len(extracted) > 10:
+                new_c = dict(c)
+                new_c["content"] = extracted
+                compressed_chunks.append(new_c)
+            else:
+                compressed_chunks.append(c)
+        except Exception:
+            compressed_chunks.append(c)
+    return compressed_chunks[:top_k]
+
+
+def search_qdrant(client, collection_name, query, embedder, username, top_k=5, title_filter=None):
+    cached_embedder = CachedHuggingFaceEmbeddings(embedder)
+    query_vector = cached_embedder.embed_query(query)
+    must_conditions = [
+        models.Filter(
+            should=[
+                models.FieldCondition(key="user_id", match=models.MatchValue(value=username)),
+                models.FieldCondition(key="user_id", match=models.MatchValue(value="public"))
+            ]
+        )
+    ]
+    if title_filter:
+        must_conditions.append(
+            models.FieldCondition(key="title", match=models.MatchValue(value=title_filter))
+        )
+    query_filter = models.Filter(must=must_conditions)
+    res = client.query_points(
+        collection_name=collection_name,
+        query=query_vector,
+        query_filter=query_filter,
+        limit=top_k * 2,
+        with_payload=True
+    )
+    processed_results = []
+    for r in res.points:
+        payload = r.payload
+        try:
+            dec_content = decrypt_text(payload["content"])
+            dec_parent = decrypt_text(payload["parent_text"])
+            dec_overlap = decrypt_text(payload["overlap_text"])
+        except Exception:
+            dec_content = payload["content"]
+            dec_parent = payload.get("parent_text", payload["content"])
+            dec_overlap = payload.get("overlap_text", payload["content"])
+        processed_results.append({
+            "content": dec_content,
+            "parent_text": dec_parent,
+            "overlap_text": dec_overlap,
+            "title": payload["title"],
+            "sent_index": payload["sent_index"],
+            "user_id": payload["user_id"],
+            "score": r.score
+        })
+    return processed_results
+
+
+def retrieve_context(query: str, client, embedder, top_k=3, vector_weight=0.5, window_size=2, metadata_filter=None, user_id=None, parent_retrieval=False):
+    """
+    Retrieves context using native Qdrant search, BM25 candidates, RRF, MMR, and Parent-Document retrieval.
+    """
+    # 1. Fetch dense candidates from Qdrant
+    vector_candidates = search_qdrant(
+        client, "research_papers", query, embedder, username=user_id, top_k=top_k * 4, title_filter=metadata_filter
+    )
+    
+    # 2. Fetch all matching documents for BM25 candidates
+    all_chunks = []
+    try:
+        must_cond = [
+            models.Filter(
+                should=[
+                    models.FieldCondition(key="user_id", match=models.MatchValue(value=user_id)),
+                    models.FieldCondition(key="user_id", match=models.MatchValue(value="public"))
+                ]
+            )
+        ]
+        if metadata_filter:
+            must_cond.append(models.FieldCondition(key="title", match=models.MatchValue(value=metadata_filter)))
+        scroll_res = client.scroll(
+            collection_name="research_papers",
+            scroll_filter=models.Filter(must=must_cond),
+            limit=5000,
+            with_payload=True
+        )
+        if scroll_res and scroll_res[0]:
+            for item in scroll_res[0]:
+                payload = item.payload
+                try:
+                    dec_content = decrypt_text(payload["content"])
+                    dec_parent = decrypt_text(payload["parent_text"])
+                    dec_overlap = decrypt_text(payload["overlap_text"])
+                except Exception:
+                    dec_content = payload["content"]
+                    dec_parent = payload.get("parent_text", payload["content"])
+                    dec_overlap = payload.get("overlap_text", payload["content"])
+                all_chunks.append({
+                    "content": dec_content,
+                    "parent_text": dec_parent,
+                    "overlap_text": dec_overlap,
+                    "title": payload["title"],
+                    "sent_index": payload["sent_index"],
+                    "user_id": payload["user_id"]
+                })
     except Exception:
         pass
         
-    print(f"[SUCCESS] Ingestion complete. Stored {ingested_count} chunks in ./research_db")
+    # 3. Perform BM25 on candidates
+    bm25_candidates = run_bm25_on_candidates(query, all_chunks, top_k=top_k * 4)
+    
+    # 4. RRF ranking merge
+    rrf_candidates = reciprocal_rank_fusion(vector_candidates, bm25_candidates, k=60)
+    
+    # 5. MMR diversification
+    mmr_candidates = maximal_marginal_relevance(query, rrf_candidates, embedder, lambda_mult=0.5, top_k=top_k * 2)
+    
+    # Format candidates
+    sources = []
+    for c in mmr_candidates:
+        retrieved_text = c["parent_text"] if parent_retrieval else c["content"]
+        score = c.get("score", 0.5)
+        sources.append({
+            "title": c["title"],
+            "content": retrieved_text,
+            "similarity": score,
+            "page": c.get("sent_index", 0) // 5 + 1
+        })
+    return sources[:top_k]
+
+
+if __name__ == "__main__":
+    client = get_qdrant_client()
+    init_qdrant_collections(client)
+    embedder = make_embedder()
+    
+    # Re-run local folder ingestion
+    import tasks
+    docs_dir = "./docs"
+    if os.path.exists(docs_dir):
+        print(f"Ingesting local files from {docs_dir}...")
+        for fname in os.listdir(docs_dir):
+            fpath = os.path.join(docs_dir, fname)
+            if os.path.isfile(fpath) and fname.lower().endswith(('.txt', '.pdf', '.md', '.docx', '.csv', '.html', '.json')):
+                print(f"Indexing {fname}...")
+                res = tasks.ingest_file_task(fpath, fname, "public")
+                if res and res.get("status") == "completed":
+                    content = res.get("content", "")
+                    chunks = parent_child_chunking(content, fname, embedder)
+                    if chunks:
+                        delete_file_from_qdrant(client, fname, "public")
+                        add_chunks_to_qdrant(client, chunks, "public", embedder)
+                        invalidate_semantic_cache_by_file(client, fname)
+        print("[SUCCESS] Local documents ingestion complete.")
