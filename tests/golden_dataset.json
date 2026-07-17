@@ -1,0 +1,22 @@
+[
+  {
+    "query": "What does class_imbalance_methods.txt say about cost-sensitive learning?",
+    "expected_answer": "Cost-sensitive learning modifies the loss function to prioritize minority classes."
+  },
+  {
+    "query": "What are the common data-level approaches to handle class imbalance?",
+    "expected_answer": "Data-level approaches include random oversampling, undersampling, SMOTE, ADASYN, and data augmentation."
+  },
+  {
+    "query": "What is the difference between Precision and Recall?",
+    "expected_answer": "Precision measures the proportion of positive predictions that are correct, while Recall measures the proportion of actual positive instances correctly identified."
+  },
+  {
+    "query": "Explain what System Prompts are in Prompt Engineering.",
+    "expected_answer": "System prompts are instructions provided at the start of a conversation that define the assistant's behavior, tone, and constraints."
+  },
+  {
+    "query": "What is Reciprocal Rank Fusion (RRF) and why is it used?",
+    "expected_answer": "Reciprocal Rank Fusion is an algorithm that merges ranked lists from multiple retrievers (like dense and sparse) by summing the reciprocal of their ranks, improving hybrid search results."
+  }
+]

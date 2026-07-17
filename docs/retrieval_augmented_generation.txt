@@ -1,0 +1,92 @@
+Retrieval-Augmented Generation (RAG) Deep Dive
+================================================
+
+Retrieval-Augmented Generation (RAG) is an architecture that enhances language model responses by dynamically fetching relevant documents from an external knowledge base at inference time. Unlike fine-tuning, RAG allows knowledge updates without retraining the model.
+
+1. Core RAG Architecture
+--------------------------
+A standard RAG pipeline consists of:
+1. Ingestion: Documents are parsed, chunked, embedded, and stored in a vector database.
+2. Retrieval: At query time, the query is embedded and compared against stored vectors to find the most relevant chunks.
+3. Augmentation: Retrieved chunks are concatenated into a context prompt.
+4. Generation: The language model generates a response grounded in the retrieved context.
+
+2. Document Chunking Strategies
+---------------------------------
+Chunking divides documents into manageable pieces for embedding and retrieval. Common strategies:
+- Fixed-size chunking: Split text every N characters or tokens with optional overlap.
+- Sentence-based chunking: Split at sentence boundaries using NLP tools.
+- Semantic chunking: Group sentences by measuring embedding distance between adjacent sentences. A new chunk begins when the cosine distance exceeds a threshold.
+- Recursive character splitting: Splits by paragraph, sentence, then word iteratively.
+
+The optimal chunk size balances specificity (small chunks for precise matching) against context sufficiency (large chunks to provide the LLM enough information).
+
+3. Embedding Models
+--------------------
+Embedding models convert text into dense vector representations. Key considerations:
+- Dimensionality: Higher dimensions encode more information but require more storage and compute.
+- all-MiniLM-L6-v2: Lightweight 384-dimensional model suitable for local CPU inference.
+- bge-large-en-v1.5: Larger 1024-dimensional BAAI model with stronger retrieval performance.
+- text-embedding-3-large: OpenAI's most powerful embedding model (paid API).
+
+4. Vector Databases
+--------------------
+Vector databases store and index embeddings for approximate nearest neighbor (ANN) search.
+- Chroma: Lightweight in-process database, single-process SQLite-backed storage.
+- Qdrant: Production-grade local or hosted vector database with payload indexing, quantization, and concurrent write support.
+- Pinecone: Managed cloud vector database with auto-scaling (paid).
+- pgvector: PostgreSQL extension for vector search (requires PostgreSQL server).
+
+5. Hybrid Search
+-----------------
+Hybrid search combines dense vector retrieval with sparse keyword matching (BM25/TF-IDF). Dense retrieval captures semantic similarity; sparse retrieval captures exact keyword matches. Combining both significantly improves retrieval recall over either method alone.
+
+Reciprocal Rank Fusion (RRF) is the standard algorithm for merging ranked lists from dense and sparse retrievers. RRF score = sum(1 / (k + rank_i)) for each retriever i, where k is typically 60.
+
+6. Reranking
+-------------
+Reranking is a post-retrieval step that scores candidate chunks against the query using a more powerful cross-attention model. Unlike embedding models which independently encode query and document, cross-encoders process them jointly, yielding more accurate relevance scores. Common rerankers include bge-reranker-base and cross-encoder/ms-marco-MiniLM-L-6-v2.
+
+7. Sentence Window Retrieval
+------------------------------
+Sentence window retrieval indexes individual sentences for high-precision matching but expands each retrieved sentence to include its neighboring sentences (e.g., 2 before and 2 after) before passing to the LLM. This preserves fine-grained matching while providing the LLM adequate context.
+
+8. Parent-Document Retrieval
+------------------------------
+Parent-document retrieval indexes small child chunks (sentences) for retrieval precision but returns their parent paragraph for LLM context. This ensures the LLM receives coherent, complete paragraphs while the retriever benefits from small chunk granularity.
+
+9. HyDE (Hypothetical Document Embeddings)
+-------------------------------------------
+HyDE bridges the vocabulary gap between short user queries and long document passages. The approach:
+1. Prompt the LLM to generate a hypothetical paragraph answering the query.
+2. Embed the hypothetical answer (not the original query).
+3. Use that embedding to retrieve real documents.
+This is particularly effective when user queries use different vocabulary than the indexed documents.
+
+10. Contextual Compression
+----------------------------
+Contextual compression reduces retrieved chunk size by extracting only the sentences directly relevant to the query. After retrieval, an LLM prompt strips irrelevant sentences from each chunk. This reduces LLM input tokens and reduces noise in the context window.
+
+11. Semantic Caching
+---------------------
+Semantic caching stores recent query-answer pairs in a vector database. At query time, new queries are compared against cached queries by cosine similarity. If similarity exceeds a threshold (e.g., 0.90), the cached answer is returned instantly without retrieval or LLM inference. This reduces latency and API token costs for repeated or near-duplicate queries.
+
+12. Multi-Hop RAG
+------------------
+Multi-hop RAG handles complex queries requiring information from multiple documents. After the first retrieval pass, the model identifies what additional information is needed and performs a second retrieval pass targeting that specific gap. This is critical for questions like "Compare the approach of Author A to Author B's method in document X."
+
+13. RAG Evaluation Metrics
+----------------------------
+Standard RAG evaluation decomposes quality into three independent dimensions:
+- Faithfulness: Are all claims in the answer grounded in the retrieved context? (1.0 = fully grounded)
+- Answer Relevance: Does the answer address the user's actual question? (1.0 = perfectly on-topic)
+- Context Precision: What proportion of the retrieved context was actually useful? (1.0 = all chunks used)
+
+14. Common RAG Failure Modes
+------------------------------
+- Retrieval failure: The correct document exists but is not retrieved (low recall).
+- Grounding failure: Retrieved context exists but the LLM ignores it and hallucinates.
+- Chunking boundary failure: The answer spans two chunks and neither chunk alone is sufficient.
+- Vocabulary mismatch: User query uses different terms than the document (solved by HyDE or query expansion).
+- Context overload: Too many retrieved chunks exceed the LLM's token limit, causing truncation.
+- Stale cache: A cached answer references content from a deleted or updated document.
