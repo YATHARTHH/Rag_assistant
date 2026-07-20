@@ -539,7 +539,7 @@ def chat_endpoint(request: Request, req: ChatRequest, username: str = Depends(ge
     is_safe_input = check_safety_guardrails(req.query, llm)
     if not is_safe_input:
         def err_stream():
-            yield f"data: Error: Input violates safety guardrail policy.\n\n"
+            yield "Error: Input violates safety guardrail policy."
         return EventSourceResponse(err_stream())
         
     # Check Semantic cache
@@ -547,8 +547,8 @@ def chat_endpoint(request: Request, req: ChatRequest, username: str = Depends(ge
     if cached_ans:
         CACHE_COUNTER.labels(result="hit").inc()
         def cache_stream():
-            yield f"data: [Semantic Cache Hit (Similarity: {sim:.2f})]\n\n"
-            yield f"data: {cached_ans}\n\n"
+            yield f"[Semantic Cache Hit (Similarity: {sim:.2f})]"
+            yield cached_ans
         return EventSourceResponse(cache_stream())
         
     CACHE_COUNTER.labels(result="miss").inc()
@@ -663,19 +663,19 @@ def chat_endpoint(request: Request, req: ChatRequest, username: str = Depends(ge
                 "filter": metadata_filter if metadata_filter else "None",
                 "sources": sources if sources else []
             })
-            yield f"data: __METADATA_START__{meta_json}__METADATA_END__\n\n"
+            yield f"__METADATA_START__{meta_json}__METADATA_END__"
             
             # LLM invocation streaming
             response_generator = llm.stream(prompt_content)
             for chunk in response_generator:
                 text_chunk = chunk.content
                 full_response += text_chunk
-                yield f"data: {text_chunk}\n\n"
+                yield text_chunk
                 
             # Log output safety check
             is_safe_output = check_safety_guardrails(full_response, llm)
             if not is_safe_output:
-                yield f"data: \n\n[WARNING] Output blocked by safety guardrail policy.\n\n"
+                yield "[WARNING] Output blocked by safety guardrail policy."
                 return
                 
             # Background RAG Evaluations & caching
@@ -688,7 +688,7 @@ def chat_endpoint(request: Request, req: ChatRequest, username: str = Depends(ge
                     eval_data = {"faithfulness": faithfulness, "relevance": relevance, "precision": precision}
                     
                     # Output evaluations JSON
-                    yield f"data: __EVAL_START__{json.dumps(eval_data)}__EVAL_END__\n\n"
+                    yield f"__EVAL_START__{json.dumps(eval_data)}__EVAL_END__"
                     
                     # Store session history
                     session_id = str(uuid.uuid4().hex[:12])
