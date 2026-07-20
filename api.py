@@ -47,6 +47,9 @@ from rag_demo import (
     compress_context_with_llm,
     add_chunks_to_qdrant,
     parent_child_chunking,
+    spell_correct_query,
+    generate_stepback_query,
+    detect_multi_hop_query,
     USER_DB_PATH
 )
 from langchain_groq import ChatGroq
@@ -159,6 +162,7 @@ class ChatRequest(BaseModel):
     prompt_style: Optional[str] = "Strict Fact-Only"
     parent_retrieval: Optional[bool] = False
     hyde: Optional[bool] = False
+    step_back: Optional[bool] = False
 
 class IngestRequest(BaseModel):
     file_name: str
@@ -181,6 +185,24 @@ def get_reranker_lazy():
     if RERANKER_MODEL is None:
         RERANKER_MODEL = make_reranker()
     return RERANKER_MODEL
+
+
+# -------------------------
+# Graceful Shutdown Handler
+# -------------------------
+import atexit
+
+def _shutdown_handler():
+    """Flushes pending Celery tasks and logs orderly shutdown."""
+    logger.info("[SHUTDOWN] Graceful shutdown initiated. Flushing pending Celery tasks...")
+    try:
+        from tasks import celery_app as _celery_app
+        _celery_app.control.broadcast("shutdown", reply=False)
+    except Exception:
+        pass
+    logger.info("[SHUTDOWN] Shutdown complete.")
+
+atexit.register(_shutdown_handler)
 
 # Global middleware for request correlation ID
 @app.middleware("http")
@@ -301,13 +323,14 @@ def check_ingest_status(task_id: str, username: str = Depends(get_current_user))
             if result and result.get("status") == "completed":
                 content = result.get("content", "")
                 filename = result.get("filename", "")
+                doc_metadata = result.get("doc_metadata", {})
                 
                 # Perform parent-child semantic chunking in uvicorn's thread
                 chunks = parent_child_chunking(content, filename, embedder)
                 if chunks:
                     # Index chunks into Qdrant cleanly under uvicorn's exclusive lock
                     delete_file_from_qdrant(client, filename, username)
-                    add_chunks_to_qdrant(client, chunks, username, embedder)
+                    add_chunks_to_qdrant(client, chunks, username, embedder, doc_metadata=doc_metadata)
                     invalidate_semantic_cache_by_file(client, filename)
                 
                 INDEXED_TASKS.add(task_id)
@@ -445,6 +468,57 @@ TOKEN_COUNTER = Counter("rag_tokens_usage_total", "Tokens consumed total counts.
 def get_metrics():
     return Response(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
+
+# -------------------------
+# Arize Phoenix Tracing (In-Process)
+# -------------------------
+try:
+    import phoenix as px
+    from openinference.instrumentation.langchain import LangChainInstrumentor
+    _phoenix_session = px.launch_app()
+    LangChainInstrumentor().instrument()
+    logger.info("Arize Phoenix tracing active at http://localhost:6006")
+except ImportError:
+    logger.warning("Arize Phoenix not installed — skipping tracing. pip install arize-phoenix openinference-instrumentation-langchain")
+except Exception as _phoenix_err:
+    logger.warning(f"Arize Phoenix failed to launch: {_phoenix_err}")
+
+
+# -------------------------
+# Exponential Backoff Retry Helper
+# -------------------------
+def with_retry(func, *args, max_retries: int = 3, **kwargs):
+    """
+    Calls func(*args, **kwargs) with exponential backoff retry on transient exceptions.
+    """
+    for attempt in range(max_retries):
+        try:
+            return func(*args, **kwargs)
+        except Exception as exc:
+            if attempt == max_retries - 1:
+                logger.warning(f"[RETRY] {func.__name__} failed after {max_retries} attempts: {exc}")
+                raise
+            wait = 2 ** attempt
+            logger.warning(f"[RETRY] {func.__name__} attempt {attempt + 1} failed, retrying in {wait}s...")
+            time.sleep(wait)
+
+
+# -------------------------
+# Context Window Truncation
+# -------------------------
+def truncate_context(context: str, max_tokens: int = 6000) -> str:
+    """
+    Auto-truncates the assembled context string if it exceeds the estimated LLM token limit.
+    Uses a 1 word ≈ 1.3 tokens approximation.
+    """
+    words = context.split()
+    estimated_tokens = int(len(words) * 1.3)
+    if estimated_tokens <= max_tokens:
+        return context
+    allowed_words = int(max_tokens / 1.3)
+    logger.warning(f"[CTX TRUNCATE] Reduced context from ~{estimated_tokens} to ~{max_tokens} estimated tokens.")
+    return " ".join(words[:allowed_words]) + "\n[...context truncated to fit token window...]"
+
 # -------------------------
 # Core Chat Streaming
 # -------------------------
@@ -490,20 +564,23 @@ def chat_endpoint(request: Request, req: ChatRequest, username: str = Depends(ge
     sources = []
     metadata_filter = None
     query_to_search = req.query
-    
-    # Query Expansion (HyDE)
+
+    # Step 1: Query Spell Correction
+    query_to_search = spell_correct_query(query_to_search)
+
+    # Step 2: Query Expansion (HyDE)
     if req.hyde:
         query_to_search = generate_hyde_response(req.query, llm)
-        
+
     if intent in ["rag", "general"]:
         # Conversational memory query rewriting
         history_dicts = [{"role": msg.role, "content": msg.content} for msg in req.history]
         rewritten_query = rewrite_query_with_history(query_to_search, history_dicts, llm)
-        
+
         # Metadata filter classification
         metadata_filter = generate_metadata_filter(rewritten_query, llm, unique_files)
-        
-        # Retrieval using RRF, MMR, and Parent Document
+
+        # Primary Retrieval using RRF, MMR, and Parent Document
         candidates = retrieve_context(
             rewritten_query,
             client,
@@ -515,12 +592,50 @@ def chat_endpoint(request: Request, req: ChatRequest, username: str = Depends(ge
             user_id=username,
             parent_retrieval=req.parent_retrieval
         )
-        
+
+        # Step 3: Step-Back Prompting (broader second retrieval pass)
+        if req.step_back:
+            stepback_query = generate_stepback_query(rewritten_query, llm)
+            if stepback_query != rewritten_query:
+                stepback_candidates = retrieve_context(
+                    stepback_query, client, embedder,
+                    top_k=max(2, req.top_k),
+                    vector_weight=req.vector_weight,
+                    window_size=req.window_size,
+                    metadata_filter=None,
+                    user_id=username,
+                    parent_retrieval=req.parent_retrieval
+                )
+                existing_contents = {c.get("content", "") for c in candidates}
+                for c in stepback_candidates:
+                    if c.get("content", "") not in existing_contents:
+                        candidates.append(c)
+
+        # Step 4: Multi-Hop Reasoning (2-pass retrieval for complex queries)
+        if detect_multi_hop_query(rewritten_query, llm):
+            logger.info("[MULTI-HOP] Detected multi-hop query — running second retrieval pass.")
+            second_pass = retrieve_context(
+                rewritten_query, client, embedder,
+                top_k=max(2, req.top_k),
+                vector_weight=req.vector_weight,
+                window_size=req.window_size,
+                metadata_filter=None,
+                user_id=username,
+                parent_retrieval=req.parent_retrieval
+            )
+            existing_titles = {c.get("title", "") for c in candidates}
+            for c in second_pass:
+                if c.get("title", "") not in existing_titles:
+                    candidates.append(c)
+
         # Contextual Compression using LLM
         sources = compress_context_with_llm(rewritten_query, candidates, llm, top_k=req.top_k)
         
-    context = "\n\n".join([f"Source: {src['title']} (Page {src.get('page', 1)})\n{src['content']}" for src in sources])
-    
+    raw_context = "\n\n".join([f"Source: {src['title']} (Page {src.get('page', 1)})\n{src['content']}" for src in sources])
+
+    # Step 5: Context Window Management — auto-truncate if over token limit
+    context = truncate_context(raw_context, max_tokens=6000)
+
     # Construct LLM prompt
     if intent in ["rag", "general"] and context:
         prompt_content = f"""
@@ -567,9 +682,9 @@ def chat_endpoint(request: Request, req: ChatRequest, username: str = Depends(ge
             eval_data = {}
             if intent in ["rag", "general"] and context:
                 try:
-                    faithfulness = evaluate_faithfulness(context, full_response, llm)
-                    relevance = evaluate_answer_relevance(req.query, full_response, llm)
-                    precision = evaluate_context_precision(rewritten_query, context, llm)
+                    faithfulness = with_retry(evaluate_faithfulness, context, full_response, llm)
+                    relevance = with_retry(evaluate_answer_relevance, req.query, full_response, llm)
+                    precision = with_retry(evaluate_context_precision, rewritten_query, context, llm)
                     eval_data = {"faithfulness": faithfulness, "relevance": relevance, "precision": precision}
                     
                     # Output evaluations JSON
@@ -585,6 +700,24 @@ def chat_endpoint(request: Request, req: ChatRequest, username: str = Depends(ge
                                    (username, session_id, "assistant", full_response))
                     conn.commit()
                     conn.close()
+
+                    # Token Usage Tracking (estimate: 1 word ≈ 1.33 tokens)
+                    try:
+                        prompt_tokens = int(len(prompt_content.split()) * 1.33)
+                        completion_tokens = int(len(full_response.split()) * 1.33)
+                        total_tokens = prompt_tokens + completion_tokens
+                        TOKEN_COUNTER.labels(type="prompt").inc(prompt_tokens)
+                        TOKEN_COUNTER.labels(type="completion").inc(completion_tokens)
+                        conn_tok = sqlite3.connect(USER_DB_PATH)
+                        cur_tok = conn_tok.cursor()
+                        cur_tok.execute(
+                            "INSERT INTO token_usage (username, query, prompt_tokens, completion_tokens, total_tokens) VALUES (?, ?, ?, ?, ?)",
+                            (username, req.query, prompt_tokens, completion_tokens, total_tokens)
+                        )
+                        conn_tok.commit()
+                        conn_tok.close()
+                    except Exception:
+                        pass
                     
                     # Save to semantic query cache
                     source_filenames = list(set([src["title"] for src in sources]))
