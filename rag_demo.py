@@ -365,11 +365,12 @@ def delete_file_from_qdrant(client, filename: str, username: str):
         pass
 
 
-def add_chunks_to_qdrant(client, chunks: list, username: str, embedder):
+def add_chunks_to_qdrant(client, chunks: list, username: str, embedder, doc_metadata: dict = None):
     cached_embedder = CachedHuggingFaceEmbeddings(embedder)
     texts = [c["content"] for c in chunks]
     embeddings = cached_embedder.embed_documents(texts)
     points = []
+    meta = doc_metadata or {}
     for idx, c in enumerate(chunks):
         point_id = str(uuid.uuid5(uuid.NAMESPACE_DNS, f"{username}_{c['title']}_sent_{c['sent_index']}"))
         enc_content = encrypt_text(c["content"])
@@ -384,7 +385,11 @@ def add_chunks_to_qdrant(client, chunks: list, username: str, embedder):
                 "overlap_text": enc_overlap,
                 "title": c["title"],
                 "sent_index": c["sent_index"],
-                "user_id": username
+                "user_id": username,
+                "author": meta.get("author", "Unknown"),
+                "creation_date": meta.get("creation_date", ""),
+                "file_size_kb": meta.get("file_size_kb", 0.0),
+                "page_count": meta.get("page_count", 0)
             }
         ))
     client.upsert(
@@ -516,6 +521,67 @@ def sanitize_id_part(title: str):
     Removes whitespace and special characters to build clean database IDs.
     """
     return "".join(c for c in title if c.isalnum() or c in "._-")
+
+
+# -------------------------
+# Query Spell Correction
+# -------------------------
+def spell_correct_query(query: str) -> str:
+    """
+    Corrects spelling errors in the query using pyspellchecker before retrieval.
+    """
+    try:
+        from spellchecker import SpellChecker
+        spell = SpellChecker()
+        words = query.split()
+        corrected = [spell.correction(w) or w for w in words]
+        corrected_query = " ".join(corrected)
+        if corrected_query.lower() != query.lower():
+            print(f"[SPELL CORRECT] '{query}' -> '{corrected_query}'")
+        return corrected_query
+    except Exception:
+        return query
+
+
+# -------------------------
+# Step-Back Prompting
+# -------------------------
+def generate_stepback_query(query: str, llm) -> str:
+    """
+    Generates a broader, abstracted version of the query for wider context retrieval (Step-Back Prompting).
+    """
+    prompt = f"""You are an expert at abstracting specific questions into broader conceptual ones.
+Given the specific query below, generate a single more general/abstract question that covers the underlying concept.
+
+Specific query: "{query}"
+Broader abstract question (respond with ONLY the broader question, no explanation):"""
+    try:
+        response = llm.invoke(prompt)
+        broader = response.content.strip()
+        if broader:
+            return broader
+    except Exception:
+        pass
+    return query
+
+
+# -------------------------
+# Multi-Hop Query Detection
+# -------------------------
+def detect_multi_hop_query(query: str, llm) -> bool:
+    """
+    Detects if a query requires combining facts from multiple documents (multi-hop reasoning).
+    """
+    prompt = f"""Determine if answering this question requires finding and combining facts from multiple different sources or documents.
+Question: "{query}"
+Respond with exactly one word: 'yes' or 'no'."""
+    try:
+        response = llm.invoke(prompt)
+        verdict = response.content.strip().lower()
+        verdict = "".join([c for c in verdict if c.isalnum()])
+        return verdict == "yes"
+    except Exception:
+        return False
 
 
 def retrieve_sentence_window(collection, retrieved_docs, user_id=None, window_size=2):

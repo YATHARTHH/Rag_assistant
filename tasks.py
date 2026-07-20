@@ -1,4 +1,6 @@
 import os
+import io
+from datetime import datetime
 from celery import Celery
 from unstructured.partition.auto import partition
 import docx
@@ -22,6 +24,38 @@ celery_app.conf.update(
 )
 
 
+def get_file_metadata(file_path: str, content: str = "") -> dict:
+    """
+    Extracts document metadata: file size, estimated page count, creation timestamp, and author.
+    """
+    try:
+        stat_info = os.stat(file_path)
+        file_size_kb = round(stat_info.st_size / 1024, 2)
+        creation_date = datetime.fromtimestamp(stat_info.st_ctime).isoformat()
+    except Exception:
+        file_size_kb = 0.0
+        creation_date = datetime.now().isoformat()
+
+    # Estimate page count from content length (~3000 chars per page)
+    page_count = max(1, len(content) // 3000) if content else 1
+
+    # Try to extract author from .docx core properties
+    author = "Unknown"
+    if file_path.lower().endswith(".docx"):
+        try:
+            doc = docx.Document(file_path)
+            author = doc.core_properties.author or "Unknown"
+        except Exception:
+            pass
+
+    return {
+        "author": author,
+        "creation_date": creation_date,
+        "file_size_kb": file_size_kb,
+        "page_count": page_count
+    }
+
+
 @celery_app.task(name="tasks.ingest_file")
 def ingest_file_task(file_path: str, filename: str, username: str):
     """
@@ -33,16 +67,20 @@ def ingest_file_task(file_path: str, filename: str, username: str):
     except Exception as e:
         print(f"[ERROR] Failed to parse {filename}: {e}")
         return {"status": "failed", "error": str(e)}
-        
+
     if not content.strip():
         return {"status": "failed", "error": "Empty document content"}
-        
+
+    # Extract file metadata for storage in vector DB payload
+    doc_metadata = get_file_metadata(file_path, content)
+
     return {
         "status": "completed",
         "content": content,
         "filename": filename,
         "username": username,
-        "file_path": file_path
+        "file_path": file_path,
+        "doc_metadata": doc_metadata
     }
 
 
