@@ -719,9 +719,10 @@ def chat_endpoint(request: Request, req: ChatRequest, username: str = Depends(ge
                     except Exception:
                         pass
                     
-                    # Save to semantic query cache
-                    source_filenames = list(set([src["title"] for src in sources]))
-                    save_to_semantic_cache(client, req.query, full_response, source_filenames, embedder)
+                    # Save to semantic query cache (only if valid answer, not a failure or warning)
+                    if "cannot find the answer" not in full_response.lower() and "[warning]" not in full_response.lower() and len(full_response.strip()) > 0:
+                        source_filenames = list(set([src["title"] for src in sources]))
+                        save_to_semantic_cache(client, req.query, full_response, source_filenames, embedder)
                 except Exception as e:
                     import traceback
                     traceback.print_exc()
