@@ -512,7 +512,17 @@ def split_into_sentences(text: str):
     Splits text into clean individual sentences using regex lookbehinds.
     """
     text = re.sub(r'\s+', ' ', text).strip()
-    sentences = re.split(r'(?<=[.!?])\s+', text)
+    # Split on . ! ? followed by space, but not preceded by single letters (initials) or digits (list numbers)
+    # Also ignore common abbreviations like e.g., i.e., vs.
+    sentence_boundary = re.compile(
+        r'(?<!\b[0-9])'          # No digit before period (e.g., 1. )
+        r'(?<!\b[A-Za-z])'       # No single letter before period (e.g., A. )
+        r'(?<!\b[eE]\.[gG])'     # No e.g.
+        r'(?<!\b[iI]\.[eE])'     # No i.e.
+        r'(?<!\b[vV][sS])'       # No vs.
+        r'(?<=[.!?])\s+'
+    )
+    sentences = sentence_boundary.split(text)
     return [s.strip() for s in sentences if s.strip()]
 
 
@@ -901,10 +911,23 @@ def cosine_similarity(v1, v2):
     return dot / (norm1 * norm2)
 
 
-def semantic_chunk_text(content: str, title: str, embedder, distance_threshold=0.3):
+def semantic_chunk_text(content: str, title: str, embedder, distance_threshold=0.5):
     """
     Groups document content into semantic chunks based on sentence distance boundaries.
+    Falls back to paragraph-based splitting if natural paragraph breaks exist.
     """
+    # Split by natural paragraph boundaries (double newlines)
+    paragraphs = [p.strip() for p in re.split(r'\r?\n\s*\r?\n', content) if p.strip()]
+    if len(paragraphs) > 1:
+        chunks = []
+        for idx, p in enumerate(paragraphs):
+            chunks.append({
+                "title": title,
+                "content": re.sub(r'\s+', ' ', p).strip(),
+                "sent_index": idx
+            })
+        return chunks
+
     sentences = split_into_sentences(content)
     if len(sentences) <= 1:
         return [{"title": title, "content": s, "sent_index": idx} for idx, s in enumerate(sentences)]
@@ -941,7 +964,6 @@ def semantic_chunk_text(content: str, title: str, embedder, distance_threshold=0
             "content": " ".join(current_chunk_sentences),
             "sent_index": chunk_index
         })
-        
     return chunks
 
 
