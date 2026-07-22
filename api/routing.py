@@ -4,137 +4,49 @@ import uuid
 import time
 import json
 import logging
-from datetime import datetime, timedelta
+import sqlite3
 from typing import List, Dict, Optional
-from fastapi import FastAPI, BackgroundTasks, HTTPException, Depends, Header, status, Request
-from fastapi.responses import JSONResponse
-from fastapi.security import OAuth2PasswordBearer
-from fastapi.middleware.cors import CORSMiddleware
+from datetime import datetime, timedelta
+
+from fastapi import APIRouter, Depends, HTTPException, Header, Request, status
+from fastapi.responses import Response, JSONResponse
 from pydantic import BaseModel
-from jose import JWTError, jwt
-from slowapi import Limiter, _rate_limit_exceeded_handler
-from slowapi.util import get_remote_address
-from slowapi.middleware import SlowAPIMiddleware
-from slowapi.errors import RateLimitExceeded
 from sse_starlette.sse import EventSourceResponse
 from qdrant_client.http import models
 
 # Import local modules
-from rag_demo import (
-    make_embedder,
-    make_reranker,
-    rerank_documents,
-    classify_query_intent,
-    check_safety_guardrails,
-    semantic_chunk_text,
-    sanitize_id_part,
-    generate_metadata_filter,
-    retrieve_context,
-    evaluate_faithfulness,
-    evaluate_answer_relevance,
-    evaluate_context_precision,
-    create_user,
-    verify_user,
-    check_semantic_cache,
-    save_to_semantic_cache,
-    init_user_db,
-    rewrite_query_with_history,
-    get_qdrant_client,
-    init_qdrant_collections,
-    delete_file_from_qdrant,
-    invalidate_semantic_cache_by_file,
-    generate_hyde_response,
-    compress_context_with_llm,
-    add_chunks_to_qdrant,
-    parent_child_chunking,
-    spell_correct_query,
-    generate_stepback_query,
-    detect_multi_hop_query,
-    USER_DB_PATH
+from database.sqlite import USER_DB_PATH, create_user, verify_user
+from database.qdrant import get_qdrant_client, delete_file_from_qdrant, add_chunks_to_qdrant
+from security.guardrails import check_safety_guardrails
+from security.pii_redactor import redact_pii
+from rag.chunking import parent_child_chunking
+from rag.embedding import make_embedder
+from rag.search import (
+    retrieve_context, check_semantic_cache, save_to_semantic_cache,
+    invalidate_semantic_cache_by_file, generate_metadata_filter,
+    spell_correct_query, generate_hyde_response, compress_context_with_llm
 )
-from langchain_groq import ChatGroq
-import sqlite3
+from rag.prompts import get_system_prompt, rewrite_query_with_history, generate_stepback_query, detect_multi_hop_query, classify_query_intent
+from rag.evaluation import evaluate_faithfulness, evaluate_answer_relevance, evaluate_context_precision
+from rag.reranking import make_reranker, rerank_documents
+from api.auth import get_current_user, create_access_token
+from api.middleware import limiter, LATENCY_HISTOGRAM, CACHE_COUNTER, TOKEN_COUNTER, logger
 
+router = APIRouter()
+
+# Globals
 INDEXED_TASKS = set()
+client = get_qdrant_client()
+embedder = make_embedder()
+RERANKER_MODEL = None
 
-# -------------------------
-# Startup Validations
-# -------------------------
-GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-if not GROQ_API_KEY:
-    print(json.dumps({"level": "CRITICAL", "message": "CRITICAL: GROQ_API_KEY environment variable is missing!"}))
-    sys.exit(1)
+def get_reranker_lazy():
+    global RERANKER_MODEL
+    if RERANKER_MODEL is None:
+        RERANKER_MODEL = make_reranker()
+    return RERANKER_MODEL
 
-# -------------------------
-# Structured Logging Config
-# -------------------------
-class JsonFormatter(logging.Formatter):
-    def format(self, record):
-        log_data = {
-            "timestamp": self.formatTime(record, self.default_time_format),
-            "level": record.levelname,
-            "message": record.getMessage(),
-            "name": record.name,
-            "correlation_id": getattr(record, "correlation_id", "None")
-        }
-        if record.exc_info:
-            log_data["exception"] = self.formatException(record.exc_info)
-        return json.dumps(log_data)
-
-logger = logging.getLogger("rag_api")
-logger.setLevel(logging.INFO)
-handler = logging.StreamHandler(sys.stdout)
-handler.setFormatter(JsonFormatter())
-logger.addHandler(handler)
-
-# -------------------------
-# Rate Limiting & JWT Setup
-# -------------------------
-limiter = Limiter(key_func=get_remote_address)
-app = FastAPI(title="RAG AI Backend API")
-app.state.limiter = limiter
-app.add_middleware(SlowAPIMiddleware)
-app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-SECRET_KEY = os.getenv("JWT_SECRET", "SecureJWTSecretKeyForRAGTokenSigning12345=")
-ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = 24 * 60
-
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="auth/login", auto_error=False)
-
-def create_access_token(data: dict):
-    to_encode = data.copy()
-    expire = datetime.utcnow() + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
-    to_encode.update({"exp": expire})
-    return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
-
-def get_current_user(token: str = Depends(oauth2_scheme), x_api_key: Optional[str] = Header(None)):
-    if x_api_key:
-        if x_api_key == os.getenv("RAG_API_KEY", "rag_developer_key_123"):
-            return "api_key_admin"
-        raise HTTPException(status_code=401, detail="Invalid API Key.")
-    if not token:
-        raise HTTPException(status_code=401, detail="Authentication credentials required.")
-    try:
-        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        username: str = payload.get("username")
-        if username is None:
-            raise HTTPException(status_code=401, detail="Invalid token payload.")
-        return username
-    except JWTError:
-        raise HTTPException(status_code=401, detail="Token has expired or is invalid.")
-
-# -------------------------
 # Request Models
-# -------------------------
 class SignupRequest(BaseModel):
     username: str
     password: str
@@ -173,67 +85,31 @@ class FeedbackRequest(BaseModel):
     rating: int
     feedback_text: Optional[str] = None
 
-# Initialize Database & Qdrant connections
-init_user_db()
-client = get_qdrant_client()
-init_qdrant_collections(client)
-embedder = make_embedder()
-RERANKER_MODEL = None
+# Exponential Backoff Retry Helper
+def with_retry(func, *args, max_retries: int = 3, **kwargs):
+    for attempt in range(max_retries):
+        try:
+            return func(*args, **kwargs)
+        except Exception as exc:
+            if attempt == max_retries - 1:
+                logger.warning(f"[RETRY] {func.__name__} failed after {max_retries} attempts: {exc}")
+                raise
+            wait = 2 ** attempt
+            logger.warning(f"[RETRY] {func.__name__} attempt {attempt + 1} failed, retrying in {wait}s...")
+            time.sleep(wait)
 
-def get_reranker_lazy():
-    global RERANKER_MODEL
-    if RERANKER_MODEL is None:
-        RERANKER_MODEL = make_reranker()
-    return RERANKER_MODEL
+# Context Window Truncation
+def truncate_context(context: str, max_tokens: int = 6000) -> str:
+    words = context.split()
+    estimated_tokens = int(len(words) * 1.3)
+    if estimated_tokens <= max_tokens:
+        return context
+    allowed_words = int(max_tokens / 1.3)
+    logger.warning(f"[CTX TRUNCATE] Reduced context from ~{estimated_tokens} to ~{max_tokens} estimated tokens.")
+    return " ".join(words[:allowed_words]) + "\n[...context truncated to fit token window...]"
 
-
-# -------------------------
-# Graceful Shutdown Handler
-# -------------------------
-import atexit
-
-def _shutdown_handler():
-    """Flushes pending Celery tasks and logs orderly shutdown."""
-    logger.info("[SHUTDOWN] Graceful shutdown initiated. Flushing pending Celery tasks...")
-    try:
-        from tasks import celery_app as _celery_app
-        _celery_app.control.broadcast("shutdown", reply=False)
-    except Exception:
-        pass
-    logger.info("[SHUTDOWN] Shutdown complete.")
-
-atexit.register(_shutdown_handler)
-
-# Global middleware for request correlation ID
-@app.middleware("http")
-async def request_logger_middleware(request: Request, call_next):
-    corr_id = request.headers.get("X-Correlation-ID", str(uuid.uuid4()))
-    request.state.correlation_id = corr_id
-    start_time = time.time()
-    try:
-        response = await call_next(request)
-        duration = time.time() - start_time
-        logger.info(
-            f"HTTP {request.method} {request.url.path} finished in {duration:.4f}s with status {response.status_code}",
-            extra={"correlation_id": corr_id}
-        )
-        response.headers["X-Correlation-ID"] = corr_id
-        return response
-    except Exception as e:
-        logger.error(
-            f"Unhandled exception during request processing: {e}", 
-            exc_info=True, 
-            extra={"correlation_id": corr_id}
-        )
-        return JSONResponse(
-            status_code=500,
-            content={"detail": "Internal Server Error", "correlation_id": corr_id}
-        )
-
-# -------------------------
-# Health Check Endpoint
-# -------------------------
-@app.get("/health", tags=["Observability"], summary="Checks server and dependency health statuses.")
+# Endpoints
+@router.get("/health", tags=["Observability"], summary="Checks server and dependency health statuses.")
 def health_check():
     status_data = {"status": "healthy", "redis": "healthy", "qdrant": "healthy", "sqlite": "healthy"}
     try:
@@ -254,10 +130,7 @@ def health_check():
         raise HTTPException(status_code=500, detail=status_data)
     return status_data
 
-# -------------------------
-# Authentication Routes
-# -------------------------
-@app.post("/auth/signup", tags=["Auth"], summary="Sign up a new user account with password validation.")
+@router.post("/auth/signup", tags=["Auth"], summary="Sign up a new user account with password validation.")
 def auth_signup(req: SignupRequest):
     if not req.username or not req.password:
         raise HTTPException(status_code=400, detail="Username and password are required.")
@@ -269,13 +142,12 @@ def auth_signup(req: SignupRequest):
         )
     return {"message": "User registered successfully."}
 
-@app.post("/auth/login", tags=["Auth"], summary="Authenticate credentials and return a signed JWT token.")
+@router.post("/auth/login", tags=["Auth"], summary="Authenticate credentials and return a signed JWT token.")
 def auth_login(req: LoginRequest):
     valid = verify_user(req.username, req.password)
     if not valid:
         raise HTTPException(status_code=401, detail="Invalid username or password.")
     
-    # Retrieve user role
     conn = sqlite3.connect(USER_DB_PATH)
     cursor = conn.cursor()
     cursor.execute("SELECT role FROM users WHERE username = ?", (req.username,))
@@ -286,14 +158,10 @@ def auth_login(req: LoginRequest):
     token = create_access_token({"username": req.username, "role": role})
     return {"token": token, "username": req.username, "role": role}
 
-# -------------------------
-# Ingestion Routes
-# -------------------------
-@app.post("/ingest", tags=["Ingestion"], summary="Queue a file for background Celery parsing and Qdrant vector indexing.")
+@router.post("/ingest", tags=["Ingestion"], summary="Queue a file for background Celery parsing and Qdrant vector indexing.")
 @limiter.limit("5/minute")
 def start_ingest(request: Request, req: IngestRequest, username: str = Depends(get_current_user)):
     from tasks import ingest_file_task
-    # File validation
     if len(req.file_bytes_hex) > 20 * 1024 * 1024:
         raise HTTPException(status_code=400, detail="File too large. Max size is 10MB.")
         
@@ -311,7 +179,7 @@ def start_ingest(request: Request, req: IngestRequest, username: str = Depends(g
     task = ingest_file_task.delay(temp_path, req.file_name, username)
     return {"task_id": task.id, "status": "queued"}
 
-@app.get("/ingest/status/{task_id}", tags=["Ingestion"], summary="Poll Celery task status for background indexing job.")
+@router.get("/ingest/status/{task_id}", tags=["Ingestion"], summary="Poll Celery task status for background indexing job.")
 def check_ingest_status(task_id: str, username: str = Depends(get_current_user)):
     from tasks import ingest_file_task
     task_res = ingest_file_task.AsyncResult(task_id)
@@ -325,10 +193,8 @@ def check_ingest_status(task_id: str, username: str = Depends(get_current_user))
                 filename = result.get("filename", "")
                 doc_metadata = result.get("doc_metadata", {})
                 
-                # Perform parent-child semantic chunking in uvicorn's thread
                 chunks = parent_child_chunking(content, filename, embedder)
                 if chunks:
-                    # Index chunks into Qdrant cleanly under uvicorn's exclusive lock
                     delete_file_from_qdrant(client, filename, username)
                     add_chunks_to_qdrant(client, chunks, username, embedder, doc_metadata=doc_metadata)
                     invalidate_semantic_cache_by_file(client, filename)
@@ -347,10 +213,7 @@ def check_ingest_status(task_id: str, username: str = Depends(get_current_user))
         return {"task_id": task_id, "status": f"error: {task_res.result}"}
     return {"task_id": task_id, "status": status}
 
-# -------------------------
-# Database Stats & Management
-# -------------------------
-@app.get("/db/stats", tags=["Database Management"], summary="Retrieves document names and index sizes for tenant.")
+@router.get("/db/stats", tags=["Database Management"], summary="Retrieves document names and index sizes for tenant.")
 def get_db_stats(username: str = Depends(get_current_user)):
     try:
         must_cond = [
@@ -377,7 +240,7 @@ def get_db_stats(username: str = Depends(get_current_user)):
         pass
     return {"total_chunks": 0, "unique_files": []}
 
-@app.delete("/db/files/{file_name}", tags=["Database Management"], summary="Deletes a specific document's chunks from vector store.")
+@router.delete("/db/files/{file_name}", tags=["Database Management"], summary="Deletes a specific document's chunks from vector store.")
 def delete_file(file_name: str, username: str = Depends(get_current_user)):
     try:
         delete_file_from_qdrant(client, file_name, username)
@@ -386,7 +249,7 @@ def delete_file(file_name: str, username: str = Depends(get_current_user)):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.post("/db/clear", tags=["Database Management"], summary="Clears all chunks uploaded by current tenant.")
+@router.post("/db/clear", tags=["Database Management"], summary="Clears all chunks uploaded by current tenant.")
 def clear_user_db(username: str = Depends(get_current_user)):
     try:
         client.delete(
@@ -399,10 +262,7 @@ def clear_user_db(username: str = Depends(get_current_user)):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-# -------------------------
-# Chat Session History
-# -------------------------
-@app.get("/chat/sessions", tags=["Chat History"], summary="Lists all past chat sessions for user.")
+@router.get("/chat/sessions", tags=["Chat History"], summary="Lists all past chat sessions for user.")
 def list_chat_sessions(username: str = Depends(get_current_user)):
     try:
         conn = sqlite3.connect(USER_DB_PATH)
@@ -414,7 +274,7 @@ def list_chat_sessions(username: str = Depends(get_current_user)):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.get("/chat/history/{session_id}", tags=["Chat History"], summary="Retrieves full log of chat session.")
+@router.get("/chat/history/{session_id}", tags=["Chat History"], summary="Retrieves full log of chat session.")
 def get_chat_history(session_id: str, username: str = Depends(get_current_user)):
     try:
         conn = sqlite3.connect(USER_DB_PATH)
@@ -426,7 +286,7 @@ def get_chat_history(session_id: str, username: str = Depends(get_current_user))
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.post("/chat/feedback", tags=["Chat History"], summary="Submit rating feedback for a response message.")
+@router.post("/chat/feedback", tags=["Chat History"], summary="Submit rating feedback for a response message.")
 def post_chat_feedback(req: FeedbackRequest, username: str = Depends(get_current_user)):
     try:
         conn = sqlite3.connect(USER_DB_PATH)
@@ -439,111 +299,37 @@ def post_chat_feedback(req: FeedbackRequest, username: str = Depends(get_current
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-# -------------------------
-# Prompts Styles Selection
-# -------------------------
-def get_system_prompt(style: str) -> str:
-    prompts_path = "./prompts.json"
-    default_prompt = "You are a helpful AI assistant."
-    if not os.path.exists(prompts_path):
-        return default_prompt
-    try:
-        with open(prompts_path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-            return data.get(style, default_prompt)
-    except Exception:
-        return default_prompt
-
-# -------------------------
-# Structured Prometheus Metrics
-# -------------------------
-from prometheus_client import Counter, Histogram, generate_latest, CONTENT_TYPE_LATEST
-from fastapi.responses import Response
-
-LATENCY_HISTOGRAM = Histogram("rag_query_latency_seconds", "Total RAG request generation latency in seconds.")
-CACHE_COUNTER = Counter("rag_cache_hits_total", "Total semantic cache query interception hits.", ["result"])
-TOKEN_COUNTER = Counter("rag_tokens_usage_total", "Tokens consumed total counts.", ["type"])
-
-@app.get("/metrics", tags=["Observability"], summary="Exposes Prometheus metrics endpoint.")
+@router.get("/metrics", tags=["Observability"], summary="Exposes Prometheus metrics endpoint.")
 def get_metrics():
+    from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
     return Response(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
-
-# -------------------------
-# Arize Phoenix Tracing (In-Process)
-# -------------------------
-try:
-    import phoenix as px
-    from openinference.instrumentation.langchain import LangChainInstrumentor
-    _phoenix_session = px.launch_app()
-    LangChainInstrumentor().instrument()
-    logger.info("Arize Phoenix tracing active at http://localhost:6006")
-except ImportError:
-    logger.warning("Arize Phoenix not installed — skipping tracing. pip install arize-phoenix openinference-instrumentation-langchain")
-except Exception as _phoenix_err:
-    logger.warning(f"Arize Phoenix failed to launch: {_phoenix_err}")
-
-
-# -------------------------
-# Exponential Backoff Retry Helper
-# -------------------------
-def with_retry(func, *args, max_retries: int = 3, **kwargs):
-    """
-    Calls func(*args, **kwargs) with exponential backoff retry on transient exceptions.
-    """
-    for attempt in range(max_retries):
-        try:
-            return func(*args, **kwargs)
-        except Exception as exc:
-            if attempt == max_retries - 1:
-                logger.warning(f"[RETRY] {func.__name__} failed after {max_retries} attempts: {exc}")
-                raise
-            wait = 2 ** attempt
-            logger.warning(f"[RETRY] {func.__name__} attempt {attempt + 1} failed, retrying in {wait}s...")
-            time.sleep(wait)
-
-
-# -------------------------
-# Context Window Truncation
-# -------------------------
-def truncate_context(context: str, max_tokens: int = 6000) -> str:
-    """
-    Auto-truncates the assembled context string if it exceeds the estimated LLM token limit.
-    Uses a 1 word ≈ 1.3 tokens approximation.
-    """
-    words = context.split()
-    estimated_tokens = int(len(words) * 1.3)
-    if estimated_tokens <= max_tokens:
-        return context
-    allowed_words = int(max_tokens / 1.3)
-    logger.warning(f"[CTX TRUNCATE] Reduced context from ~{estimated_tokens} to ~{max_tokens} estimated tokens.")
-    return " ".join(words[:allowed_words]) + "\n[...context truncated to fit token window...]"
-
-# -------------------------
-# Core Chat Streaming
-# -------------------------
-@app.post("/chat", tags=["Core RAG"], summary="Streams chat responses using Server-Sent Events (SSE) event formats.")
+@router.post("/chat", tags=["Core RAG"], summary="Streams chat responses using Server-Sent Events (SSE) event formats.")
 @limiter.limit("10/minute")
 def chat_endpoint(request: Request, req: ChatRequest, username: str = Depends(get_current_user)):
+    # 0. PII Redaction
+    redacted_query = redact_pii(req.query)
+    
     # 1. Fetch Prompts Config
     sys_prompt = get_system_prompt(req.prompt_style or "Strict Fact-Only")
     
     # 2. Input Safety Guardrail check
     GROQ_KEY = os.getenv("GROQ_API_KEY", "")
+    from langchain_groq import ChatGroq
     llm = ChatGroq(
         temperature=req.temperature,
         groq_api_key=GROQ_KEY,
         model=req.model_name,
     )
     
-    is_safe_input = check_safety_guardrails(req.query, llm)
+    is_safe_input = check_safety_guardrails(redacted_query, llm)
     if not is_safe_input:
         def err_stream():
             yield "Error: Input violates safety guardrail policy."
         return EventSourceResponse(err_stream())
         
     # Check Semantic cache
-    cached_ans, sim = check_semantic_cache(client, req.query, embedder, score_threshold=0.90)
+    cached_ans, sim = check_semantic_cache(client, redacted_query, embedder, score_threshold=0.90)
     if cached_ans:
         CACHE_COUNTER.labels(result="hit").inc()
         def cache_stream():
@@ -554,7 +340,7 @@ def chat_endpoint(request: Request, req: ChatRequest, username: str = Depends(ge
     CACHE_COUNTER.labels(result="miss").inc()
     
     # 3. Intent Routing
-    intent = classify_query_intent(req.query, llm)
+    intent = classify_query_intent(redacted_query, llm)
     
     # Ingested files listing
     stats = get_db_stats(username)
@@ -563,14 +349,14 @@ def chat_endpoint(request: Request, req: ChatRequest, username: str = Depends(ge
     # Retrieve & Rerank Context
     sources = []
     metadata_filter = None
-    query_to_search = req.query
+    query_to_search = redacted_query
 
     # Step 1: Query Spell Correction
     query_to_search = spell_correct_query(query_to_search)
 
     # Step 2: Query Expansion (HyDE)
     if req.hyde:
-        query_to_search = generate_hyde_response(req.query, llm)
+        query_to_search = generate_hyde_response(redacted_query, llm)
 
     if intent in ["rag", "general"]:
         # Conversational memory query rewriting
@@ -593,7 +379,7 @@ def chat_endpoint(request: Request, req: ChatRequest, username: str = Depends(ge
             parent_retrieval=req.parent_retrieval
         )
 
-        # Step 3: Step-Back Prompting (broader second retrieval pass)
+        # Step 3: Step-Back Prompting
         if req.step_back:
             stepback_query = generate_stepback_query(rewritten_query, llm)
             if stepback_query != rewritten_query:
@@ -611,7 +397,7 @@ def chat_endpoint(request: Request, req: ChatRequest, username: str = Depends(ge
                     if c.get("content", "") not in existing_contents:
                         candidates.append(c)
 
-        # Step 4: Multi-Hop Reasoning (2-pass retrieval for complex queries)
+        # Step 4: Multi-Hop Reasoning
         if detect_multi_hop_query(rewritten_query, llm):
             logger.info("[MULTI-HOP] Detected multi-hop query — running second retrieval pass.")
             second_pass = retrieve_context(
@@ -628,21 +414,20 @@ def chat_endpoint(request: Request, req: ChatRequest, username: str = Depends(ge
                 if c.get("title", "") not in existing_titles:
                     candidates.append(c)
 
-        # Contextual Compression using LLM
+        # Contextual Reranking fallback & LLM compression
+        reranker = get_reranker_lazy()
+        candidates = rerank_documents(rewritten_query, candidates, reranker, llm, top_k=req.rerank_pool)
         sources = compress_context_with_llm(rewritten_query, candidates, llm, top_k=req.top_k)
         
     raw_context = "\n\n".join([f"Source: {src['title']} (Page {src.get('page', 1)})\n{src['content']}" for src in sources])
-
-    # Step 5: Context Window Management — auto-truncate if over token limit
     context = truncate_context(raw_context, max_tokens=6000)
 
-    # Construct LLM prompt
     if intent in ["rag", "general"] and context:
         prompt_content = f"""
         {sys_prompt}
         Use the following retrieved context to answer the question:
         
-        Question: {req.query}
+        Question: {redacted_query}
         Context:
         {context}
         """
@@ -650,14 +435,12 @@ def chat_endpoint(request: Request, req: ChatRequest, username: str = Depends(ge
         prompt_content = f"""
         {sys_prompt}
         Answer the following question:
-        {req.query}
+        {redacted_query}
         """
         
     def sse_event_stream():
         with LATENCY_HISTOGRAM.time():
             full_response = ""
-            
-            # Streaming metadata block first
             meta_json = json.dumps({
                 "routing": "RAG Retrieval" if intent == "rag" and context else f"Direct Chat ({intent})",
                 "filter": metadata_filter if metadata_filter else "None",
@@ -665,32 +448,27 @@ def chat_endpoint(request: Request, req: ChatRequest, username: str = Depends(ge
             })
             yield f"__METADATA_START__{meta_json}__METADATA_END__"
             
-            # LLM invocation streaming
             response_generator = llm.stream(prompt_content)
             for chunk in response_generator:
                 text_chunk = chunk.content
                 full_response += text_chunk
-                yield text_chunk
+                yield redact_pii(text_chunk)
                 
-            # Log output safety check
             is_safe_output = check_safety_guardrails(full_response, llm)
             if not is_safe_output:
                 yield "[WARNING] Output blocked by safety guardrail policy."
                 return
                 
-            # Background RAG Evaluations & caching
             eval_data = {}
             if intent in ["rag", "general"] and context:
                 try:
                     faithfulness = with_retry(evaluate_faithfulness, context, full_response, llm)
-                    relevance = with_retry(evaluate_answer_relevance, req.query, full_response, llm)
+                    relevance = with_retry(evaluate_answer_relevance, redacted_query, full_response, llm)
                     precision = with_retry(evaluate_context_precision, rewritten_query, context, llm)
                     eval_data = {"faithfulness": faithfulness, "relevance": relevance, "precision": precision}
                     
-                    # Output evaluations JSON
                     yield f"__EVAL_START__{json.dumps(eval_data)}__EVAL_END__"
                     
-                    # Store session history
                     session_id = str(uuid.uuid4().hex[:12])
                     conn = sqlite3.connect(USER_DB_PATH)
                     cursor = conn.cursor()
@@ -701,7 +479,6 @@ def chat_endpoint(request: Request, req: ChatRequest, username: str = Depends(ge
                     conn.commit()
                     conn.close()
 
-                    # Token Usage Tracking (estimate: 1 word ≈ 1.33 tokens)
                     try:
                         prompt_tokens = int(len(prompt_content.split()) * 1.33)
                         completion_tokens = int(len(full_response.split()) * 1.33)
@@ -719,12 +496,10 @@ def chat_endpoint(request: Request, req: ChatRequest, username: str = Depends(ge
                     except Exception:
                         pass
                     
-                    # Save to semantic query cache (only if valid answer, not a failure or warning)
                     if "cannot find the answer" not in full_response.lower() and "[warning]" not in full_response.lower() and len(full_response.strip()) > 0:
                         source_filenames = list(set([src["title"] for src in sources]))
-                        save_to_semantic_cache(client, req.query, full_response, source_filenames, embedder)
+                        save_to_semantic_cache(client, redacted_query, full_response, source_filenames, embedder)
                 except Exception as e:
-                    import traceback
-                    traceback.print_exc()
+                    logger.error(f"[ROUTING] Evaluation or caching error: {e}")
                     
     return EventSourceResponse(sse_event_stream())
