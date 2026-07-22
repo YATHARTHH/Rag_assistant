@@ -533,8 +533,27 @@ def spell_correct_query(query: str) -> str:
     try:
         from spellchecker import SpellChecker
         spell = SpellChecker()
+        
+        # Load specific domain terms
+        domain_terms = ['rrf', 'hyde', 'smote', 'adasyn', 'mcc', 'auc-roc', 'auc-pr', 'g-mean', 'bleu', 'rouge', 'f1', 'f1-score']
+        spell.word_frequency.load_words(domain_terms)
+        
         words = query.split()
-        corrected = [spell.correction(w) or w for w in words]
+        corrected = []
+        for w in words:
+            stripped = w.strip(".,?!;:()\"'")
+            # Skip spell checking if all-caps (acronyms), contains hyphens, or is a known domain term
+            if stripped.isupper() or "-" in stripped or stripped.lower() in domain_terms:
+                corrected.append(w)
+            else:
+                corr = spell.correction(stripped)
+                if corr:
+                    left_punc = w[:len(w) - len(w.lstrip(".,?!;:()\"'"))]
+                    right_punc = w[len(w.rstrip(".,?!;:()\"'")):]
+                    corrected.append(left_punc + corr + right_punc)
+                else:
+                    corrected.append(w)
+                    
         corrected_query = " ".join(corrected)
         if corrected_query.lower() != query.lower():
             print(f"[SPELL CORRECT] '{query}' -> '{corrected_query}'")
