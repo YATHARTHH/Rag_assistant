@@ -177,9 +177,10 @@ with st.sidebar:
         disabled=not enable_reranking
     )
     
-    # Upgrades: Parent Document, HyDE, Prompt style
+    # Upgrades: Parent Document, HyDE, Step-Back, Prompt style
     parent_retrieval = st.toggle("Enable Parent-Document Retrieval", value=True)
     hyde = st.toggle("Enable HyDE Query Expansion", value=False)
+    step_back = st.toggle("Enable Step-Back Prompting", value=False)
     
     prompt_style = st.selectbox(
         "Assistant Prompt Style",
@@ -360,7 +361,8 @@ with tab_chat:
                 "rerank_pool": rerank_pool,
                 "prompt_style": prompt_style,
                 "parent_retrieval": parent_retrieval,
-                "hyde": hyde
+                "hyde": hyde,
+                "step_back": step_back
             }
             
             try:
