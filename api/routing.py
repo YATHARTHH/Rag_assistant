@@ -529,12 +529,17 @@ def chat_endpoint(request: Request, req: ChatRequest, username: str = Depends(ge
     raw_context = "\n\n".join([f"Source: {src['title']} (Page {src.get('page', 1)})\n{src['content']}" for src in sources])
     context = truncate_context(raw_context, max_tokens=6000)
 
+    # Restore PII in the prompt so the LLM sees real values (only logs/traces see redacted form)
+    prompt_query = redacted_query
+    for placeholder, orig_val in pii_mapping.items():
+        prompt_query = prompt_query.replace(placeholder, orig_val)
+
     if context:
         prompt_content = f"""
         {sys_prompt}
         Use the following retrieved context to answer the question:
         
-        Question: {redacted_query}
+        Question: {prompt_query}
         Context:
         {context}
         """
@@ -542,7 +547,7 @@ def chat_endpoint(request: Request, req: ChatRequest, username: str = Depends(ge
         # No context available — use a permissive prompt so LLM can answer from general knowledge
         prompt_content = f"""You are a helpful AI assistant. Answer the following question using your general knowledge. Be concise and factual.
 
-        Question: {redacted_query}
+        Question: {prompt_query}
         """
         
     def sse_event_stream():
@@ -557,16 +562,36 @@ def chat_endpoint(request: Request, req: ChatRequest, username: str = Depends(ge
             yield f"__METADATA_START__{meta_json}__METADATA_END__"
             
             response_generator = llm.stream(prompt_content)
+            
+            # Sliding buffer for safe cross-chunk PII de-anonymization
+            # Holds partial output until we are sure no placeholder spans the chunk boundary
+            stream_buffer = ""
+            placeholder_max_len = max((len(p) for p in pii_mapping), default=0) if pii_mapping else 0
+            
             for chunk in response_generator:
                 text_chunk = chunk.content
                 full_response += text_chunk
+                stream_buffer += text_chunk
                 
-                # De-anonymize token chunk before streaming
-                output_chunk = text_chunk
+                # Replace any complete placeholders in the buffer
                 for placeholder, orig_val in pii_mapping.items():
-                    output_chunk = output_chunk.replace(placeholder, orig_val)
-                    output_chunk = output_chunk.replace(placeholder.rstrip("0123456789_"), orig_val)
-                yield output_chunk
+                    stream_buffer = stream_buffer.replace(placeholder, orig_val)
+                
+                # Emit everything except the last `placeholder_max_len` chars
+                # Those tail chars are held back in case the next chunk completes a placeholder
+                if placeholder_max_len > 0 and len(stream_buffer) > placeholder_max_len:
+                    safe_to_emit = stream_buffer[:-placeholder_max_len]
+                    stream_buffer = stream_buffer[-placeholder_max_len:]
+                    yield safe_to_emit
+                elif placeholder_max_len == 0:
+                    yield stream_buffer
+                    stream_buffer = ""
+            
+            # Flush remaining buffer — apply final PII restoration pass on any tail
+            for placeholder, orig_val in pii_mapping.items():
+                stream_buffer = stream_buffer.replace(placeholder, orig_val)
+            if stream_buffer:
+                yield stream_buffer
                 
             is_safe_output = check_safety_guardrails(full_response, llm)
             if not is_safe_output:
