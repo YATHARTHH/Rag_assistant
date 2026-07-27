@@ -414,10 +414,10 @@ def chat_endpoint(request: Request, req: ChatRequest, username: str = Depends(ge
                 if c.get("title", "") not in existing_titles:
                     candidates.append(c)
 
-        # Contextual Reranking fallback & LLM compression
+        # Contextual Reranking fallback
         reranker = get_reranker_lazy()
         candidates = rerank_documents(rewritten_query, candidates, reranker, llm, top_k=req.rerank_pool)
-        sources = compress_context_with_llm(rewritten_query, candidates, llm, top_k=req.top_k)
+        sources = candidates[:req.top_k]
         
     raw_context = "\n\n".join([f"Source: {src['title']} (Page {src.get('page', 1)})\n{src['content']}" for src in sources])
     context = truncate_context(raw_context, max_tokens=6000)
