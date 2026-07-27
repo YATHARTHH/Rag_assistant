@@ -446,8 +446,10 @@ def chat_endpoint(request: Request, req: ChatRequest, username: str = Depends(ge
     if req.hyde:
         query_to_search = generate_hyde_response(redacted_query, llm)
 
-    if intent in ["rag", "general"]:
-        # Conversational memory query rewriting
+    rewritten_query = query_to_search
+
+    if intent == "rag":
+        # Full RAG pipeline: rewrite → retrieve → rerank → CRAG
         history_dicts = [{"role": msg.role, "content": msg.content} for msg in req.history]
         rewritten_query = rewrite_query_with_history(query_to_search, history_dicts, llm)
 
@@ -467,7 +469,7 @@ def chat_endpoint(request: Request, req: ChatRequest, username: str = Depends(ge
             parent_retrieval=req.parent_retrieval
         )
 
-        # Step 3: Step-Back Prompting
+        # Step-Back Prompting
         if req.step_back:
             stepback_query = generate_stepback_query(rewritten_query, llm)
             if stepback_query != rewritten_query:
@@ -485,7 +487,7 @@ def chat_endpoint(request: Request, req: ChatRequest, username: str = Depends(ge
                     if c.get("content", "") not in existing_contents:
                         candidates.append(c)
 
-        # Step 4: Multi-Hop Reasoning
+        # Multi-Hop Reasoning
         if detect_multi_hop_query(rewritten_query, llm):
             logger.info("[MULTI-HOP] Detected multi-hop query — running second retrieval pass.")
             second_pass = retrieve_context(
@@ -502,24 +504,32 @@ def chat_endpoint(request: Request, req: ChatRequest, username: str = Depends(ge
                 if c.get("title", "") not in existing_titles:
                     candidates.append(c)
 
-        # Corrective RAG (CRAG) check
+        # CRAG: fallback to web search if local similarity is too low
         max_score = max([c.get("similarity", 0.0) for c in candidates]) if candidates else 0.0
         if max_score < 0.30:
-            logger.info(f"[CRAG] Low similarity score ({max_score:.2f}) - triggering Web search fallback.")
+            logger.info(f"[CRAG] RAG similarity too low ({max_score:.2f}) — triggering web search fallback.")
             web_sources = run_web_search(rewritten_query, max_results=3)
             if web_sources:
                 candidates = web_sources
                 crag_active = True
 
-        # Contextual Reranking fallback
+        # Contextual Reranking
         reranker = get_reranker_lazy()
         candidates = rerank_documents(rewritten_query, candidates, reranker, llm, top_k=req.rerank_pool)
         sources = candidates[:req.top_k]
+
+    elif intent == "general":
+        # General knowledge: skip heavy RAG pipeline, go straight to CRAG web search
+        logger.info(f"[CRAG] General intent detected — triggering web search directly.")
+        web_sources = run_web_search(query_to_search, max_results=3)
+        if web_sources:
+            sources = web_sources
+            crag_active = True
         
     raw_context = "\n\n".join([f"Source: {src['title']} (Page {src.get('page', 1)})\n{src['content']}" for src in sources])
     context = truncate_context(raw_context, max_tokens=6000)
 
-    if intent in ["rag", "general"] and context:
+    if context:
         prompt_content = f"""
         {sys_prompt}
         Use the following retrieved context to answer the question:
@@ -529,10 +539,10 @@ def chat_endpoint(request: Request, req: ChatRequest, username: str = Depends(ge
         {context}
         """
     else:
-        prompt_content = f"""
-        {sys_prompt}
-        Answer the following question:
-        {redacted_query}
+        # No context available — use a permissive prompt so LLM can answer from general knowledge
+        prompt_content = f"""You are a helpful AI assistant. Answer the following question using your general knowledge. Be concise and factual.
+
+        Question: {redacted_query}
         """
         
     def sse_event_stream():
