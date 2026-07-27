@@ -267,6 +267,38 @@ def get_db_stats(username: str = Depends(get_current_user)):
         pass
     return {"total_chunks": 0, "unique_files": []}
 
+@router.get("/db/token_usage", tags=["Database Management"], summary="Retrieves total token usage statistics and cost estimations.")
+def get_token_usage_stats(username: str = Depends(get_current_user)):
+    try:
+        conn = sqlite3.connect(USER_DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT COUNT(*), SUM(prompt_tokens), SUM(completion_tokens), SUM(total_tokens) FROM token_usage WHERE username = ?",
+            (username,)
+        )
+        row = cursor.fetchone()
+        conn.close()
+        if row and row[0] is not None and row[0] > 0:
+            count, prompt, completion, total = row
+            # Llama-3.3-70b pricing: $0.59 per million prompt, $0.79 per million completion tokens
+            cost = (prompt * 0.59 / 1000000) + (completion * 0.79 / 1000000)
+            return {
+                "query_count": count,
+                "prompt_tokens": prompt,
+                "completion_tokens": completion,
+                "total_tokens": total,
+                "estimated_cost_usd": round(cost, 5)
+            }
+    except Exception:
+        pass
+    return {
+        "query_count": 0,
+        "prompt_tokens": 0,
+        "completion_tokens": 0,
+        "total_tokens": 0,
+        "estimated_cost_usd": 0.0
+    }
+
 @router.delete("/db/files/{file_name}", tags=["Database Management"], summary="Deletes a specific document's chunks from vector store.")
 def delete_file(file_name: str, username: str = Depends(get_current_user)):
     try:

@@ -263,7 +263,22 @@ with st.sidebar:
     except Exception:
         pass
 
-    # 7. Telemetry & Observability Links
+    # 7. Token Usage & Cost Auditor
+    st.markdown("---")
+    st.subheader("🪙 Token Usage & Cost Auditor")
+    try:
+        tok_resp = requests.get(f"{API_URL}/db/token_usage", headers=headers)
+        if tok_resp.status_code == 200:
+            tok_stats = tok_resp.json()
+            st.markdown(f"**Total Queries**: `{tok_stats['query_count']}`")
+            st.markdown(f"**Tokens Consumed**: `{tok_stats['total_tokens']:,}`")
+            st.markdown(f"↳ *Prompt*: `{tok_stats['prompt_tokens']:,}`")
+            st.markdown(f"↳ *Completion*: `{tok_stats['completion_tokens']:,}`")
+            st.markdown(f"**Estimated Costs**: `${tok_stats['estimated_cost_usd']:.5f} USD`")
+    except Exception:
+        pass
+
+    # 8. Telemetry & Observability Links
     st.markdown("---")
     st.subheader("📊 Developer Telemetry")
     st.markdown("[🔍 Open Arize Phoenix Tracing (Port 6006)](http://localhost:6006)", unsafe_allow_html=True)
