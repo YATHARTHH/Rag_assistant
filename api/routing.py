@@ -363,11 +363,32 @@ def get_metrics():
     from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
     return Response(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
+def run_web_search(query: str, max_results: int = 3) -> List[Dict]:
+    """
+    Fallback search using DuckDuckGo to retrieve real-time web context.
+    """
+    try:
+        from duckduckgo_search import DDGS
+        with DDGS() as ddgs:
+            results = list(ddgs.text(query, max_results=max_results))
+            sources = []
+            for idx, r in enumerate(results):
+                sources.append({
+                    "title": f"Web: {r.get('title', 'Search Result')}",
+                    "content": r.get("body", ""),
+                    "similarity": 0.85 - (idx * 0.05),
+                    "page": r.get("href", "http://duckduckgo.com")
+                })
+            return sources
+    except Exception as e:
+        logger.warning(f"[CRAG] DuckDuckGo search fallback failed: {e}")
+        return []
+
 @router.post("/chat", tags=["Core RAG"], summary="Streams chat responses using Server-Sent Events (SSE) event formats.")
 @limiter.limit("10/minute")
 def chat_endpoint(request: Request, req: ChatRequest, username: str = Depends(get_current_user)):
-    # 0. PII Redaction
-    redacted_query = redact_pii(req.query)
+    # 0. PII Redaction with mapping tracking
+    redacted_query, pii_mapping = redact_pii(req.query, return_mapping=True)
     
     # 1. Fetch Prompts Config
     sys_prompt = get_system_prompt(req.prompt_style or "Strict Fact-Only")
@@ -393,7 +414,12 @@ def chat_endpoint(request: Request, req: ChatRequest, username: str = Depends(ge
         CACHE_COUNTER.labels(result="hit").inc()
         def cache_stream():
             yield f"[Semantic Cache Hit (Similarity: {sim:.2f})]"
-            yield cached_ans
+            # Restore PII in cached response before yielding
+            out_ans = cached_ans
+            for placeholder, orig_val in pii_mapping.items():
+                out_ans = out_ans.replace(placeholder, orig_val)
+                out_ans = out_ans.replace(placeholder.rstrip("0123456789_"), orig_val)
+            yield out_ans
         return EventSourceResponse(cache_stream())
         
     CACHE_COUNTER.labels(result="miss").inc()
@@ -409,6 +435,7 @@ def chat_endpoint(request: Request, req: ChatRequest, username: str = Depends(ge
     sources = []
     metadata_filter = None
     query_to_search = redacted_query
+    crag_active = False
 
     # Step 1: Query Spell Correction
     query_to_search = spell_correct_query(query_to_search)
@@ -473,6 +500,15 @@ def chat_endpoint(request: Request, req: ChatRequest, username: str = Depends(ge
                 if c.get("title", "") not in existing_titles:
                     candidates.append(c)
 
+        # Corrective RAG (CRAG) check
+        max_score = max([c.get("similarity", 0.0) for c in candidates]) if candidates else 0.0
+        if max_score < 0.30:
+            logger.info(f"[CRAG] Low similarity score ({max_score:.2f}) - triggering Web search fallback.")
+            web_sources = run_web_search(rewritten_query, max_results=3)
+            if web_sources:
+                candidates = web_sources
+                crag_active = True
+
         # Contextual Reranking fallback
         reranker = get_reranker_lazy()
         candidates = rerank_documents(rewritten_query, candidates, reranker, llm, top_k=req.rerank_pool)
@@ -500,8 +536,9 @@ def chat_endpoint(request: Request, req: ChatRequest, username: str = Depends(ge
     def sse_event_stream():
         with LATENCY_HISTOGRAM.time():
             full_response = ""
+            route_tag = "Corrective Web Search" if crag_active else ("RAG Retrieval" if intent == "rag" and context else f"Direct Chat ({intent})")
             meta_json = json.dumps({
-                "routing": "RAG Retrieval" if intent == "rag" and context else f"Direct Chat ({intent})",
+                "routing": route_tag,
                 "filter": metadata_filter if metadata_filter else "None",
                 "sources": sources if sources else []
             })
@@ -511,7 +548,13 @@ def chat_endpoint(request: Request, req: ChatRequest, username: str = Depends(ge
             for chunk in response_generator:
                 text_chunk = chunk.content
                 full_response += text_chunk
-                yield redact_pii(text_chunk)
+                
+                # De-anonymize token chunk before streaming
+                output_chunk = text_chunk
+                for placeholder, orig_val in pii_mapping.items():
+                    output_chunk = output_chunk.replace(placeholder, orig_val)
+                    output_chunk = output_chunk.replace(placeholder.rstrip("0123456789_"), orig_val)
+                yield output_chunk
                 
             is_safe_output = check_safety_guardrails(full_response, llm)
             if not is_safe_output:
