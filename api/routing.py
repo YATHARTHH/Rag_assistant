@@ -365,21 +365,23 @@ def get_metrics():
 
 def run_web_search(query: str, max_results: int = 3) -> List[Dict]:
     """
-    Fallback search using DuckDuckGo to retrieve real-time web context.
+    Fallback search using DuckDuckGo (ddgs) to retrieve real-time web context.
     """
+    logger.info(f"[CRAG] Running web search for: {query[:80]}")
     try:
-        from duckduckgo_search import DDGS
-        with DDGS() as ddgs:
-            results = list(ddgs.text(query, max_results=max_results))
-            sources = []
-            for idx, r in enumerate(results):
-                sources.append({
-                    "title": f"Web: {r.get('title', 'Search Result')}",
-                    "content": r.get("body", ""),
-                    "similarity": 0.85 - (idx * 0.05),
-                    "page": r.get("href", "http://duckduckgo.com")
-                })
-            return sources
+        from ddgs import DDGS
+        d = DDGS()
+        results = list(d.text(query, max_results=max_results))
+        sources = []
+        for idx, r in enumerate(results):
+            sources.append({
+                "title": f"Web: {r.get('title', 'Search Result')}",
+                "content": r.get("body", ""),
+                "similarity": 0.85 - (idx * 0.05),
+                "page": r.get("href", "http://duckduckgo.com")
+            })
+        logger.info(f"[CRAG] Web search returned {len(sources)} results.")
+        return sources
     except Exception as e:
         logger.warning(f"[CRAG] DuckDuckGo search fallback failed: {e}")
         return []
