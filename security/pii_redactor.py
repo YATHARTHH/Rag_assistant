@@ -14,10 +14,10 @@ def redact_pii(text: str) -> str:
         return text
     
     # Redact Emails
-    text = EMAIL_REGEX.sub("[EMAIL]", text)
+    text = EMAIL_REGEX.sub("redacted_email", text)
     # Redact Phone Numbers
-    text = PHONE_REGEX.sub("[PHONE]", text)
+    text = PHONE_REGEX.sub("redacted_phone", text)
     # Redact IP Addresses
-    text = IPV4_REGEX.sub("[IP_ADDRESS]", text)
+    text = IPV4_REGEX.sub("redacted_ip", text)
     
     return text
