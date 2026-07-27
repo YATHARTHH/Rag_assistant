@@ -13,4 +13,4 @@ pillow
 fastapi
 uvicorn
 requests
-duckduckgo-search>=6.2.0
+ddgs>=1.0.0
