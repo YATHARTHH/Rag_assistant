@@ -1,142 +1,221 @@
-# 🤖 RAG-based AI Assistant
+# 🤖 Enterprise Production-Grade RAG Assistant
 
-A Retrieval-Augmented Generation (RAG) based AI Assistant built using Python and Streamlit. This project demonstrates how to retrieve relevant documents from a knowledge base and generate answers using embeddings, retrieval, and a large language model (LLM) pipeline.
+An advanced, production-ready **Retrieval-Augmented Generation (RAG)** platform engineered with Python, FastAPI, Qdrant, FastEmbed, SQLite, Groq (Llama 3.3 70B), and Streamlit. Designed with a modular multi-tenant architecture, multi-stage retrieval, self-healing corrective web fallback, bi-directional PII redaction, token cost auditing, real-time LLM-as-a-Judge metrics, and developer telemetry.
+
+---
 
 ## 📌 Table of Contents
 
 - [Overview](#-overview)
-- [Features](#-features)
-- [Installation & Setup](#️-installation--setup)
-- [Usage](#-usage)
-- [Architecture & Methodology](#-architecture--methodology)
-- [Query Processing & Retrieval](#-query-processing--retrieval)
-- [Experiments & Results](#-experiments--results)
-- [Evaluation & Metrics](#-evaluation--metrics)
-- [Future Work](#-future-work)
+- [Key Features](#-key-features)
+- [Architecture & System Flow](#-architecture--system-flow)
+- [Project Directory Structure](#-project-directory-structure)
+- [Installation & Setup](#-installation--setup)
+- [Usage Guide](#-usage-guide)
+- [Detailed Technical Pipeline](#-detailed-technical-pipeline)
+- [Security, Privacy & Multi-Tenancy](#-security-privacy--multi-tenancy)
+- [Telemetry, Observability & Costs](#-telemetry-observability--costs)
+- [Automated Evaluation & LLM-as-a-Judge](#-automated-evaluation--llm-as-a-judge)
+- [Detailed Documentation](#-detailed-documentation)
 - [License](#-license)
-- [Acknowledgements](#-acknowledgements)
+
+---
 
 ## 📖 Overview
 
-Traditional AI assistants often rely solely on pre-trained models, which can lead to hallucinated or outdated responses when external knowledge is required. To address this, the Retrieval-Augmented Generation (RAG) approach integrates a retrieval step with generative models. This project focuses on building a simple RAG pipeline with Streamlit to demonstrate how external knowledge can enhance response accuracy and relevance.
+Standard RAG implementations suffer from hallucination, context loss ("lost-in-the-middle"), security leaks, lack of evaluation, and dead-end responses when queries fall outside the document domain. 
 
-## ✨ Features
+This platform solves these challenges through an **Enterprise Production RAG Architecture**:
+1. **Multi-Stage Hybrid Search**: Combines Dense (FastEmbed) + Sparse (BM25) search via Reciprocal Rank Fusion (RRF) with Cross-Encoder reranking and Lost-in-the-Middle chunk reordering.
+2. **Corrective RAG (CRAG)**: Automatically detects when local document retrieval confidence is low ($<0.30$) or when queries have general intent, falling back seamlessly to DuckDuckGo live web search.
+3. **Bi-Directional PII Shield**: Scrubs emails, phone numbers, and IP addresses before logging or sending to cloud APIs, while dynamically restoring PII in LLM prompts and user output streams.
+4. **Local Resiliency**: Autonomously processes document ingestion using FastAPI `BackgroundTasks` when offline from Celery/Redis.
+5. **Real-time LLM-as-a-Judge**: Continuously evaluates Faithfulness, Answer Relevance, and Context Precision per response with automatic hallucination warnings.
 
-- **Interactive Interface**: Users can input questions via a Streamlit UI and receive AI-generated answers
-- **Document Retrieval**: Retrieves relevant documents from a local knowledge base using embeddings and similarity search
-- **Answer Generation**: Combines retrieved documents with the user's question to generate context-aware responses
-- **Visual Feedback**: Optionally view the top retrieved documents that contributed to the answer
+---
+
+## ✨ Key Features
+
+### 🧠 Advanced RAG & Retrieval
+- **Paragraph-First & Parent-Child Chunking**: Preserves structural lists, code blocks, and paragraph continuity.
+- **Hybrid RRF Search**: Merges vector similarity (FastEmbed `BAAI/bge-small-en-v1.5`) and lexical keywords (BM25).
+- **MMR Diversification**: Eliminates redundant context chunks.
+- **Cross-Encoder Reranking**: Re-scores top candidates using local transformer rerankers (`ms-marco-MiniLM-L-6-v2`).
+- **Lost-in-the-Middle Re-ordering**: Places top-ranked context at prompt boundaries to prevent LLM context attenuation.
+- **Step-Back Query Expansion & HyDE**: Generates abstract conceptual queries and hypothetical answers.
+- **Multi-Hop Query Reasoning**: Performs automated multi-pass retrieval for comparative questions.
+- **Corrective RAG (CRAG)**: Self-healing web fallback via DuckDuckGo (`ddgs`) when document similarity $<0.30$.
+
+### 🛡️ Security, Privacy & Multi-Tenancy
+- **Multi-Tenant JWT Auth**: Role-based access control (`admin`, `readonly`) with bcrypt password strength verification.
+- **Payload Encryption at Rest**: Fernet AES-256 encryption on all stored chunk texts in Qdrant payloads.
+- **Bi-Directional PII Scrubbing**: Masks sensitive PII for logs/tracing while safely restoring context for LLM generation and user output.
+- **Input & Output Safety Guardrails**: LLM-powered classifier blocks jailbreaks, toxicity, and instruction overrides.
+
+### ⚡ Performance & Telemetry
+- **SQLite Semantic Cache**: Instant sub-100ms hits for cosine-similar queries ($\ge 0.90$).
+- **Token Usage & API Cost Auditor**: Tracks cumulative query counts, token breakdowns, and estimated USD expenses in real-time.
+- **Developer Telemetry**: Prometheus metrics endpoint (`/metrics`) and Arize Phoenix tracing integration.
+- **Local Ingestion Fallback**: Asynchronous background ingestion fallback via FastAPI `BackgroundTasks`.
+
+---
+
+## 🏗️ Architecture & System Flow
+
+```mermaid
+flowchart TD
+    User([👤 User / UI]) -->|Query| Auth[🔐 JWT Auth & Rate Limiter]
+    Auth --> PII[🛡️ PII Redactor]
+    PII --> Safety[🚧 Safety Classifier]
+    Safety --> Cache{⚡ Semantic Cache?}
+    
+    Cache -- Hit (>= 0.90) --> RespStream[📤 SSE Output Stream]
+    Cache -- Miss --> Intent{🧭 Intent Classifier}
+    
+    Intent -- 'general' --> CRAG[🌐 DuckDuckGo Web Fallback]
+    Intent -- 'rag' --> Rewrite[📝 Memory Query Rewriter]
+    
+    Rewrite --> Hybrid[🔍 Hybrid Search: Dense BGE + Sparse BM25]
+    Hybrid --> RRF[🔀 Reciprocal Rank Fusion]
+    RRF --> StepBack[🔙 Step-Back & Multi-Hop Pass]
+    StepBack --> ScoreCheck{Max Similarity >= 0.30?}
+    
+    ScoreCheck -- No --> CRAG
+    ScoreCheck -- Yes --> Rerank[🎯 Cross-Encoder Reranker]
+    
+    CRAG --> PromptBuild[📑 Prompt Construction + Lost-in-Middle Reordering]
+    Rerank --> PromptBuild
+    
+    PromptBuild --> LLM[🤖 Groq Llama-3.3 70B Stream]
+    LLM --> PIIRestore[🔓 PII Restoration Buffer]
+    PIIRestore --> RespStream
+    
+    RespStream --> Eval[📊 LLM-as-a-Judge: Faithfulness, Relevance, Precision]
+    Eval --> DB[(💾 SQLite Session History & Feedback)]
+```
+
+---
+
+## 📁 Project Directory Structure
+
+```
+rag_ai_assistant/
+├── api/                   # REST API & FastAPI Routing Layer
+│   ├── auth.py            # JWT authentication & password verification
+│   ├── main.py            # FastAPI app initialization & CORS middleware
+│   ├── middleware.py      # Rate limiting, correlation IDs, Prometheus metrics
+│   └── routing.py         # RAG pipeline, CRAG fallback, token cost routes
+├── database/              # Storage & Database Abstractions
+│   ├── qdrant.py          # Qdrant client, collections, INT8 quantization
+│   └── sqlite.py          # User DB, chat sessions, feedback, token logs
+├── rag/                   # Core RAG Algorithms & Pipeline Modules
+│   ├── chunking.py        # Paragraph-first & parent-child chunkers
+│   ├── embedding.py       # FastEmbed models & SQLite embedding cache
+│   ├── evaluation.py     # LLM-as-a-Judge (Faithfulness, Relevance, Precision)
+│   ├── prompts.py         # Intent routing, query rewriter, step-back prompts
+│   ├── reranking.py       # Local Cross-Encoder reranker & fallbacks
+│   └── search.py          # Hybrid RRF search, BM25, MMR, semantic cache
+├── security/              # Security & Guardrail Systems
+│   ├── encryption.py      # Fernet AES-256 payload encryption at rest
+│   ├── guardrails.py      # Input/output safety classifier
+│   └── pii_redactor.py    # Bi-directional PII scrubbing & mapping
+├── docs/                  # In-depth Documentation & Interview Guides
+│   ├── PROJECT_DEEP_DIVE.md # Comprehensive end-to-end technical guide
+│   └── INTERVIEW_QA.md     # 30+ System Design & RAG Interview Q&As
+├── app.py                 # Streamlit Frontend Application
+├── tasks.py               # Celery worker task definitions
+├── watcher.py             # Hot-reloading document directory watcher
+├── requirements.txt       # Python dependencies
+└── README.md              # Project overview (this document)
+```
+
+---
 
 ## 🛠️ Installation & Setup
 
-### Clone the Repository
+### 1. Prerequisites
+- Python 3.10+
+- Groq API Key (Set in `.env`)
+
+### 2. Environment Setup
 ```bash
 git clone https://github.com/YATHARTHH/Rag_assistant.git
 cd Rag_assistant
-```
 
-### Set Up Environment & Dependencies
-```bash
+# Create virtual environment
+python -m venv venv
+.\venv\Scripts\activate   # Windows
+# source venv/bin/activate # Linux/Mac
+
+# Install dependencies
 pip install -r requirements.txt
 ```
 
-### Run the Application
+### 3. Environment Variables
+Create a `.env` file in the root directory:
+```env
+GROQ_API_KEY=your_groq_api_key_here
+SECRET_KEY=your_super_secret_jwt_key
+QDRANT_PATH=./qdrant_db
+```
+
+### 4. Start Services
+
+**Terminal 1: Start Backend API (FastAPI)**
+```bash
+python -m uvicorn api.main:app --host 127.0.0.1 --port 8000
+```
+
+**Terminal 2: Start Frontend UI (Streamlit)**
 ```bash
 streamlit run app.py
 ```
 
-Open the Streamlit app in your browser (default: [http://localhost:8501](http://localhost:8501)).
-
-## 📱 Usage
-
-1. Launch the application using the command above
-2. Enter your question in the text input field
-3. Click "Get Answer" to retrieve relevant documents and generate a response
-4. Optionally check "Show retrieved documents" to view the source documents used for the answer
-
-## 🧠 Architecture & Methodology
-
-### Backend (`rag_demo.py`)
-
-- **`make_embedder()`**: Creates an embedding model to convert text into numerical vectors
-- **`get_collection()`**: Prepares a vector collection to store and manage document embeddings
-- **`answer_research_question(query)`**: Retrieves relevant documents, passes them to the model to generate an answer, and returns the final response
-
-### Frontend (`app.py` with Streamlit)
-
-- Provides a clean UI with the title "RAG-based AI Assistant"
-- Users can input a question in a text box
-- On clicking "Get Answer", the assistant retrieves and generates a response using the RAG pipeline
-- A checkbox option allows users to view the top retrieved documents that contributed to the answer
-
-## 🔎 Query Processing & Retrieval
-
-The retrieval process follows these steps:
-
-1. **Preprocessing**: Queries are lowercased and stripped of unnecessary characters
-2. **Embedding**: The query is converted into a vector representation
-3. **Similarity Search**: The system retrieves the top-5 most similar documents from the vector database
-4. **Optional Filtering**: Documents can be re-ranked based on relevance scores
-5. **Answer Generation**: The selected documents are passed to the language model to generate the final response
-
-## 🧪 Experiments & Results
-
-- **Tested Queries**: Custom questions were tested on the assistant
-- **Document Relevance**: Retrieved documents matched the context of the questions
-- **Answer Accuracy**: Answers improved when retrieved documents were relevant
-- **Comparison**: Answers with retrieved documents were more accurate compared to using the generative model alone
-
-## 📊 Evaluation & Metrics
-
-- **Retrieval Accuracy**: Approximately 85% of queries successfully retrieved at least one relevant supporting document
-- **Answer Quality**: Responses were significantly better when retrieval was used compared to using the generative model alone
-- **Chunking & Overlap Strategy**: Text is split into smaller chunks of 500 tokens with an overlap of 100 tokens to handle large documents efficiently and preserve context continuity
-
-## 🚀 Future Work
-
-- **Conversational Memory**: Implementing a conversational memory buffer to track previous user queries and answers for context-aware, multi-turn interactions
-- **Advanced Retrieval Evaluation**: Adding formal metrics such as Recall@k, Precision@k, and Mean Reciprocal Rank (MRR) for systematic evaluation
-- **Scalability**: Integrating with larger vector databases (e.g., Pinecone, Weaviate, FAISS) for enterprise-scale knowledge bases
-- **Enhanced Reasoning**: Experimenting with chain-of-thought prompting and re-ranking to improve response quality
-- **User Experience**: Expanding the Streamlit interface with features like query history, feedback collection, and export options
-
-## 📁 Project Structure
-
-```
-Rag_assistant/
-├── app.py                 # Streamlit frontend application
-├── rag_demo.py           # Backend RAG implementation
-├── requirements.txt      # Python dependencies
-├── README.md            # Project documentation
-└── LICENSE              # License file
-```
-
-## 🔧 Requirements
-
-- Python 3.8+
-- Streamlit
-- LangChain
-- OpenAI API (or compatible LLM)
-- Vector database dependencies (FAISS, Chroma, etc.)
-
-## 📄 License
-
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
-
-## 🙏 Acknowledgements
-
-- [Ready Tensor](https://www.readytensor.ai/) for providing the platform and resources
-- [LangChain](https://langchain.com/) for the powerful framework enabling LLMs to interact with external data sources
-- [Streamlit](https://streamlit.io/) for the intuitive UI framework
-
-## 🤝 Contributing
-
-Contributions are welcome! Please feel free to submit a Pull Request.
-
-## 📞 Contact
-
-For questions or feedback, please open an issue on GitHub or contact the repository owner.
+Open your browser at **`http://localhost:8501`**.
 
 ---
 
-⭐ If you found this project helpful, please give it a star!
+## 📱 Usage Guide
+
+1. **Authentication**: Register an account or log in with your credentials on the Streamlit sidebar.
+2. **Document Manager**: Upload `.pdf`, `.txt`, `.docx`, `.csv`, or `.json` files via the drag-and-drop uploader. The system will parse, chunk, encrypt, and index the content into Qdrant.
+3. **Chatting**: Ask questions in the **💬 Chat** tab. The UI displays:
+   - Route tags (`⚡ Route: RAG Retrieval`, `⚡ Route: Corrective Web Search`, etc.)
+   - File filters
+   - Collapsible Grounding Sources with page numbers & similarity scores
+   - Real-time hallucination warning banners if faithfulness $< 0.70$
+   - 👍 / 👎 Feedback collection buttons
+4. **Token Cost Auditor**: Monitor cumulative prompt/completion tokens and estimated USD costs in the sidebar.
+5. **Evaluation Dashboard**: Switch to the **📊 Evaluation Dashboard** tab to view metric averages (Faithfulness, Answer Relevance, Context Precision), trend charts, and detailed evaluation logs over time.
+
+---
+
+## 🔐 Security, Privacy & Multi-Tenancy
+
+- **Data Isolation**: All vector payloads and SQLite records are isolated by tenant (`user_id`). Users can only search or delete their own documents.
+- **AES-256 Encryption at Rest**: Document text stored in Qdrant payloads is encrypted using Fernet AES-256 keying and decrypted in-memory only during query processing.
+- **Bi-Directional PII Redaction**: Sensitive patterns (email, phone, IPv4) are replaced with `redacted_*` tokens during logging and telemetry to prevent data leaks. The original PII is safely restored in the final response stream.
+
+---
+
+## 📊 Telemetry, Observability & Costs
+
+- **Prometheus Metrics**: Access `/metrics` for real-time counters on query latencies, cache hit/miss rates, and active requests.
+- **Arize Phoenix Tracing**: Visual open-telemetry tracing available on `http://localhost:6006`.
+- **Token Cost Auditor**: Live breakdown of prompt tokens, completion tokens, query counts, and estimated costs based on Llama-3.3-70B pricing ($0.59 / $0.79 per million tokens).
+
+---
+
+## 📚 Detailed Documentation
+
+For a deeper dive into the system design, code architecture, algorithms, and interview questions:
+- 📖 **[Project Deep Dive Guide](docs/PROJECT_DEEP_DIVE.md)** — Complete end-to-end breakdown with Mermaid diagrams, mathematical formulas, and module-by-module walkthroughs.
+- 🎓 **[RAG System Design Interview Q&A](docs/INTERVIEW_QA.md)** — 30+ comprehensive interview questions and answers covering vector DBs, quantization, RRF, CRAG, PII security, and LLM evaluation.
+
+---
+
+## 📄 License
+
+This project is licensed under the MIT License — see the [LICENSE](LICENSE) file for details.
+
+⭐ **If you found this project helpful, please give it a star on GitHub!**
