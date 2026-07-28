@@ -119,9 +119,10 @@ rag_ai_assistant/
 │   ├── encryption.py      # Fernet AES-256 payload encryption at rest
 │   ├── guardrails.py      # Input/output safety classifier
 │   └── pii_redactor.py    # Bi-directional PII scrubbing & mapping
-├── docs/                  # In-depth Documentation & Interview Guides
+├── documentation/         # System Documentation & Technical Guides
 │   ├── PROJECT_DEEP_DIVE.md # Comprehensive end-to-end technical guide
 │   └── INTERVIEW_QA.md     # 30+ System Design & RAG Interview Q&As
+├── docs/                  # Sample knowledge base documents for RAG indexing
 ├── app.py                 # Streamlit Frontend Application
 ├── tasks.py               # Celery worker task definitions
 ├── watcher.py             # Hot-reloading document directory watcher
@@ -209,8 +210,8 @@ Open your browser at **`http://localhost:8501`**.
 ## 📚 Detailed Documentation
 
 For a deeper dive into the system design, code architecture, algorithms, and interview questions:
-- 📖 **[Project Deep Dive Guide](docs/PROJECT_DEEP_DIVE.md)** — Complete end-to-end breakdown with Mermaid diagrams, mathematical formulas, and module-by-module walkthroughs.
-- 🎓 **[RAG System Design Interview Q&A](docs/INTERVIEW_QA.md)** — 30+ comprehensive interview questions and answers covering vector DBs, quantization, RRF, CRAG, PII security, and LLM evaluation.
+- 📖 **[Project Deep Dive Guide](documentation/PROJECT_DEEP_DIVE.md)** — Complete end-to-end breakdown with Mermaid diagrams, mathematical formulas, and module-by-module walkthroughs.
+- 🎓 **[RAG System Design Interview Q&A](documentation/INTERVIEW_QA.md)** — 30+ comprehensive interview questions and answers covering vector DBs, quantization, RRF, CRAG, PII security, and LLM evaluation.
 
 ---
 
