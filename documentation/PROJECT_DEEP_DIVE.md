@@ -370,10 +370,190 @@ Given top reranked chunks $[C_1, C_2, C_3, C_4, C_5]$:
 
 ---
 
-## 9. Production Deployment Checklist
+## 9. ML/DL Models Used in the Platform
 
-- [x] Set 64-character JWT `SECRET_KEY` in `.env`.
-- [x] Persist `./qdrant_db` on SSD storage.
-- [x] Enable SQLite WAL mode (`PRAGMA journal_mode=WAL;`).
-- [x] Deploy behind Nginx reverse proxy with TLS HTTPS.
-- [x] Run Celery Redis workers (`celery -A tasks worker --loglevel=info`) for asynchronous document processing.
+This platform uses **4 distinct ML/DL models**, each selected for a specific role in the pipeline. Here is a complete breakdown:
+
+---
+
+### Model 1: FastEmbed — `BAAI/bge-small-en-v1.5` (Dense Embedding Model)
+
+| Property | Details |
+| :--- | :--- |
+| **Model Type** | Bi-Encoder Sentence Transformer (BERT architecture) |
+| **Dimensions** | 384-dimensional dense vectors |
+| **Runtime** | ONNX Runtime (CPU, no GPU required) |
+| **Size** | ~130 MB |
+| **Used For** | Converting document chunks and user queries into vector embeddings for similarity search |
+
+**Why this model over OpenAI `text-embedding-3-small`?**
+- Runs **100% locally** — zero API cost, zero network latency.
+- ONNX Runtime is 3–5x faster than PyTorch for CPU inference.
+- Achieves top rankings on MTEB benchmarks despite being 130MB (vs 1500MB+ for larger models).
+- Produces **compact 384-d vectors** (vs OpenAI's 1536-d), requiring 75% less Qdrant storage.
+
+**Pipeline role**: Documents are embedded at ingestion time. User queries are embedded at runtime. Cosine similarity between these vectors is the core of retrieval.
+
+---
+
+### Model 2: Sentence Transformers — `ms-marco-MiniLM-L-6-v2` (Cross-Encoder Reranker)
+
+| Property | Details |
+| :--- | :--- |
+| **Model Type** | Cross-Encoder Transformer (joint query+doc attention) |
+| **Architecture** | MiniLM-L-6 (6 attention layers, distilled from BERT-Large) |
+| **Size** | ~90 MB |
+| **Latency** | ~50ms for 20 candidate chunks |
+| **Used For** | Re-scoring and reranking top-20 candidate chunks retrieved by FastEmbed + BM25 |
+
+**Why Cross-Encoder instead of just Bi-Encoder similarity?**
+- A Bi-Encoder computes `cosine_sim(embed(query), embed(doc))` independently. It **cannot model word-level interactions** between query and document.
+- A Cross-Encoder feeds `[CLS] + query + [SEP] + document` through **joint self-attention layers**. Every word in the query attends to every word in the document.
+- This produces up to **30% higher precision** at the cost of slower inference — perfectly acceptable after Bi-Encoder already narrows candidates to 20.
+
+**Pipeline role**: After RRF fusion produces top-20 candidates, this model reranks them to top-3 for the LLM prompt.
+
+---
+
+### Model 3: Groq Llama-3.3-70B (`llama-3.3-70b-versatile`)
+
+| Property | Details |
+| :--- | :--- |
+| **Model Type** | Decoder-only Large Language Model (LLM) |
+| **Parameter Count** | 70 Billion |
+| **Context Window** | 128K tokens |
+| **Inference Speed** | 250–300 tokens/second on Groq LPU |
+| **Used For** | RAG answer generation, intent classification, query rewriting, safety guardrails, step-back generation, LLM-as-a-Judge evaluation |
+
+**Why Groq + Llama-3.3-70B over OpenAI GPT-4?**
+- Groq's **LPU (Language Processing Unit)** hardware is purpose-built for transformer inference, delivering 250–300 tokens/second — 10x faster than standard GPU clusters.
+- Cost: **$0.59 per million prompt tokens** and **$0.79 per million completion tokens** vs GPT-4o at $2.50 / $10.00 per million — saving 80–95% on API spend.
+- Llama-3.3-70B is an **open-weights model** — if needed, it can be self-hosted on private GPUs (vLLM) for complete air-gapped operation.
+- Instruction-following quality matches GPT-4 on RAG, summarization, and structured JSON output tasks.
+
+**Pipeline role**: Used for 6 distinct tasks: answer generation, intent routing, conversational query rewriting, step-back query expansion, safety guardrail classification, and LLM-as-a-Judge evaluation.
+
+---
+
+### Model 4: BM25 (Statistical Sparse Retrieval — No Neural Weights)
+
+| Property | Details |
+| :--- | :--- |
+| **Model Type** | Statistical keyword scoring algorithm (not a neural network) |
+| **Library** | `rank_bm25` Python package |
+| **Size** | No model weights — computed at runtime over candidate pool |
+| **Latency** | $<1\text{ms}$ for 20 candidates |
+| **Used For** | Lexical keyword matching on the candidate chunk pool |
+
+**Why BM25 alongside neural embeddings?**
+- Neural embeddings capture **semantic meaning** but miss **exact keyword matches** (product codes, acronyms, names, version numbers).
+- BM25 catches **exact keyword** occurrences that embeddings overlook.
+- Combining both via RRF fusion achieves the best of both worlds: semantic + lexical coverage.
+
+---
+
+## 10. Enterprise Cloud Production Deployment — AWS
+
+> **Why AWS?** AWS has the largest managed ML/AI service ecosystem, most mature Kubernetes (EKS) tooling, broadest global region coverage (33 regions), and native integrations between services like S3, ElastiCache, and RDS. It is the most widely adopted enterprise cloud platform.
+
+### AWS Architecture Diagram
+
+```mermaid
+flowchart TD
+    Client([👤 Internet Users]) --> CF[🌐 AWS CloudFront CDN + Route 53 DNS]
+    CF --> WAF[🛡️ AWS WAF + AWS Shield DDoS Protection]
+    WAF --> ALB[⚖️ AWS Application Load Balancer - HTTPS + ACM SSL Certificate]
+
+    subgraph EKS ["☸️ AWS EKS Kubernetes Cluster (Private VPC Subnets)"]
+        ALB -->|app.domain.com| StreamlitPods[🖥️ Streamlit UI Pods x3]
+        ALB -->|api.domain.com| FastAPIPods[⚡ FastAPI Gateway Pods x5]
+        FastAPIPods --> CeleryPods[⚙️ Celery Worker Pods x3]
+        StreamlitPods -.->|Internal API| FastAPIPods
+    end
+
+    subgraph PrivateData ["🔒 Private Subnet - Managed Data Tier"]
+        FastAPIPods --> Qdrant[(🧠 Qdrant Cloud / EC2 i3en NVMe)]
+        FastAPIPods --> RDS[(💾 AWS RDS PostgreSQL Multi-AZ)]
+        FastAPIPods --> Redis[(⚡ AWS ElastiCache Redis Cluster)]
+        CeleryPods --> S3[(📁 AWS S3 - SSE-KMS Encrypted)]
+    end
+
+    FastAPIPods --> Groq[🤖 Groq LPU API / Private vLLM on g5 EC2]
+    FastAPIPods --> Secrets[🔑 AWS Secrets Manager]
+    FastAPIPods --> CloudWatch[📈 AWS CloudWatch + Datadog APM]
+```
+
+### AWS Service Breakdown — What & Why
+
+| AWS Service | Replaces (Local) | What It Does | Why AWS Chose This |
+| :--- | :--- | :--- | :--- |
+| **AWS EKS** | Local Terminal | Runs Docker containers of FastAPI, Streamlit, Celery as Kubernetes pods. HPA auto-scales from 3 to 50 replicas. | Kubernetes is the industry standard for container orchestration. EKS gives managed control plane without self-managing Kubernetes master nodes. |
+| **AWS ECR** | Local Docker images | Private Docker image registry. Stores versioned FastAPI and Streamlit images. | Tight IAM integration with EKS — pods pull images without manual authentication. |
+| **AWS ALB** | `localhost:8000` | Routes HTTPS traffic to correct pod groups. Terminates SSL/TLS. | Layer 7 routing allows path-based (`/api/*`) and host-based (`api.domain.com`) rules. Health checks automatically remove unhealthy pods from rotation. |
+| **AWS WAF** | None | Blocks SQL injection, XSS, bot scrapers, and custom IP blacklists at the CDN edge. | Protects before traffic reaches any application pod, saving compute. |
+| **AWS CloudFront** | None | Global CDN that caches static UI assets. Reduces Streamlit pod load. | 450+ edge PoPs globally reduces latency from 200ms to $<30\text{ms}$ for international users. |
+| **AWS RDS PostgreSQL (Multi-AZ)** | SQLite `users.db` | Stores users, sessions, feedback, token logs, semantic cache. Multi-AZ ensures automatic failover in $<30\text{s}$. | SQLite cannot handle thousands of concurrent writes. RDS Multi-AZ provides zero-downtime failover across two availability zones. |
+| **AWS ElastiCache Redis** | Local Redis | Celery task broker queue for async ingestion. Also stores distributed semantic cache entries. | Managed cluster auto-failover. Removes Redis as a single-point-of-failure in document ingestion. |
+| **AWS S3 + KMS** | Local `./docs` folder | Stores uploaded raw PDF, DOCX, TXT files with AES-256 server-side encryption and lifecycle policies. | 11 9's data durability. Built-in versioning for document rollback. KMS manages encryption keys with automatic rotation. |
+| **AWS Secrets Manager** | `.env` file | Stores `GROQ_API_KEY`, `JWT_SECRET_KEY`, `DB_PASSWORD`, `FERNET_KEY` with 90-day automatic rotation. | `.env` files on disk are a security liability. Secrets Manager uses IAM roles — pods retrieve secrets at runtime without storing them on disk. |
+| **AWS CloudWatch + Datadog** | Prometheus / Arize Phoenix | Centralized logging, metric dashboards, APM traces, and PagerDuty alerting on error rate spikes. | CloudWatch integrates natively with all AWS services. Datadog provides distributed tracing across FastAPI, Qdrant, PostgreSQL, and Redis in one unified view. |
+| **Qdrant Cloud (NVMe EC2)** | Local `./qdrant_db` | Multi-node vector database cluster with read replicas. | EC2 `i3en` instances provide NVMe SSDs (3.3 TB) optimized for Qdrant's write-heavy ingestion workloads. |
+
+---
+
+## 11. Enterprise Cloud Production Deployment — GCP
+
+> **Why GCP?** Google Cloud Platform has a strong ML ecosystem (Vertex AI, TPU pods), superior BigQuery analytics integration, and is often preferred for AI-first organizations. GCP's **Cloud Run** offers serverless auto-scaling to zero — perfect for cost-efficient RAG workloads with variable traffic patterns.
+
+### GCP Architecture Diagram
+
+```mermaid
+flowchart TD
+    Client([👤 Internet Users]) --> GCPDNS[🌐 GCP Cloud DNS]
+    GCPDNS --> CloudArmor[🛡️ GCP Cloud Armor WAF + DDoS]
+    CloudArmor --> GCPLB[⚖️ GCP Global HTTP(S) Load Balancer + Managed SSL]
+
+    subgraph GKE ["☸️ GCP GKE Autopilot Cluster (Private VPC)"]
+        GCPLB -->|app.domain.com| StreamlitPods[🖥️ Streamlit UI Cloud Run / GKE Pods]
+        GCPLB -->|api.domain.com| FastAPIPods[⚡ FastAPI Gateway GKE Pods]
+        FastAPIPods --> CeleryPods[⚙️ Celery Worker Pods]
+    end
+
+    subgraph PrivateVPC ["🔒 Private VPC - Managed Data Services"]
+        FastAPIPods --> Qdrant[(🧠 Qdrant Cloud on GCP)]
+        FastAPIPods --> CloudSQL[(💾 GCP Cloud SQL PostgreSQL HA)]
+        FastAPIPods --> Memorystore[(⚡ GCP Memorystore for Redis)]
+        CeleryPods --> GCS[(📁 GCP Cloud Storage - CMEK)]
+    end
+
+    FastAPIPods --> Groq[🤖 Groq API / Vertex AI Model Garden]
+    FastAPIPods --> SecretMgr[🔑 GCP Secret Manager]
+    FastAPIPods --> CloudTrace[📈 GCP Cloud Monitoring + Cloud Trace]
+```
+
+### GCP Service Breakdown — What & Why
+
+| GCP Service | Replaces (Local) | What It Does | Why GCP Chose This |
+| :--- | :--- | :--- | :--- |
+| **GCP GKE Autopilot** | Local Terminal | Fully managed Kubernetes where Google automatically provisions, scales, and patches nodes. No worker node management needed. | Autopilot eliminates the need to manually configure node pools, instance types, and node autoscaling — Google handles it automatically based on pod resource requests. |
+| **GCP Cloud Run** (alternative) | Local FastAPI server | Serverless container platform that scales FastAPI from 0 to 1000 instances in seconds. Charges only per request (pay-per-use). | For RAG workloads with variable traffic, Cloud Run saves 60–80% cost over always-on EKS/GKE worker nodes. Scales to zero during off-hours. |
+| **GCP Artifact Registry** | Local Docker images | Stores Docker images. Replaces Docker Hub with IAM-integrated private repositories per region. | Native integration with GKE — containers pull images via Workload Identity without credentials stored in pods. |
+| **GCP Global Load Balancer + Cloud Armor** | `localhost:8000` | Anycast Layer 7 load balancing across all GCP regions. Cloud Armor implements OWASP Top 10 WAF rules. | GCP's single anycast IP routes users to the nearest region automatically, reducing latency compared to regional ALBs. |
+| **GCP Cloud SQL PostgreSQL (HA)** | SQLite `users.db` | Fully managed PostgreSQL with synchronous replication to a hot standby. Automatic failover in $<60\text{s}$. | Cloud SQL HA provides a read replica in a second zone for zero-data-loss failover. Supports `pg_vector` extension if migrating embedding cache to Postgres. |
+| **GCP Memorystore for Redis** | Local Redis | Fully managed Redis cluster for Celery task queue and semantic cache. Supports 99.9% SLA. | Memorystore supports Redis Cluster mode with automatic sharding, allowing semantic cache to horizontally scale across multiple nodes. |
+| **GCP Cloud Storage (GCS) + CMEK** | Local `./docs` folder | Object storage for uploaded documents with Customer-Managed Encryption Keys (CMEK) via GCP KMS. | CMEK gives organizations direct cryptographic control over document encryption keys — required for HIPAA and GDPR compliance. |
+| **GCP Secret Manager** | `.env` file | Stores API keys and credentials with version history and IAM-controlled access via Workload Identity Federation. | Workload Identity allows GKE pods to access secrets via identity binding without any secret credentials stored inside container images or env files. |
+| **GCP Cloud Monitoring + Cloud Trace** | Prometheus / Arize Phoenix | Centralized metrics dashboards, distributed tracing, log-based alerting, and uptime checks. | Native OpenTelemetry support traces requests from GCP Load Balancer through GKE pods to Cloud SQL and Memorystore, providing end-to-end latency breakdown with zero config. |
+| **Vertex AI Model Garden** (optional) | Groq API | GCP's managed ML model hosting platform. Can host Llama-3.3-70B or Gemini on dedicated TPU/GPU infrastructure. | For organizations requiring data residency compliance, Vertex AI hosts LLMs within the same GCP region as the application, ensuring query data never leaves the compliance boundary. |
+
+---
+
+## 12. Production Deployment Checklist
+
+- [x] Set 64-character JWT `SECRET_KEY` in AWS Secrets Manager or GCP Secret Manager.
+- [x] Persist Qdrant on NVMe SSD storage (AWS EC2 i3en or dedicated Qdrant Cloud cluster).
+- [x] Enable SQLite WAL mode locally (`PRAGMA journal_mode=WAL;`) or migrate to RDS/Cloud SQL in production.
+- [x] Deploy behind AWS ALB or GCP Load Balancer with TLS HTTPS.
+- [x] Run Celery workers on dedicated worker pods with ElastiCache/Memorystore Redis as broker.
+- [x] Enable HPA (Horizontal Pod Autoscaler) for FastAPI pods based on CPU/request queue metrics.
+- [x] Configure VPC private subnets for all databases — zero public IP exposure.
