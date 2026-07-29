@@ -531,3 +531,66 @@ Qdrant disk storage is capped by point limits. If disk writes fail, the ingestio
 1. **Graph-RAG (Knowledge Graph Integration)**: Extract entity-relation triples (e.g. `SMOTE -> handles -> Class Imbalance`) during ingestion and store them in a Graph DB (Neo4j). Combine graph traversal with vector search to solve complex multi-entity relational queries.
 2. **Local GPU LLM Inference (Ollama/vLLM)**: Host a local Llama-3.1-70B model using vLLM on dedicated GPUs for 100% air-gapped offline capability and zero cloud API dependencies.
 3. **Automated Continuous Evaluation & Fine-Tuning**: Automatically harvest high-scoring user QA interactions into a golden dataset to fine-tune specialized domain-specific embedding and reranker models.
+
+---
+
+## 9. Enterprise Cloud Production Deployment (AWS & GCP)
+
+### Q56: How would you deploy this RAG application to AWS production at scale?
+**Answer:**
+In AWS enterprise production:
+1. **Containerization & Compute**: FastAPI backend and Streamlit frontend are packaged into Docker images, stored in **AWS ECR (Elastic Container Registry)**, and deployed on **AWS EKS (Elastic Kubernetes Service)** using Kubernetes deployment manifests with Horizontal Pod Autoscaler (HPA) to scale pods based on CPU/Memory usage.
+2. **Ingress & Load Balancing**: **AWS ALB (Application Load Balancer)** sits at the edge with AWS WAF protection and ACM TLS/SSL certificates (`https://`), routing `api.domain.com` to FastAPI pods and `app.domain.com` to Streamlit pods.
+3. **Database Layer**:
+   - **Vector Store**: Managed **Qdrant Cloud** cluster or self-hosted Qdrant on **AWS EC2 i3en NVMe instances** in private VPC subnets.
+   - **Relational DB**: **AWS RDS PostgreSQL** (Multi-AZ deployment) replacing local SQLite for multi-region replication, high concurrency, and automated daily snapshots.
+   - **Caching & Queue**: **AWS ElastiCache for Redis** for Celery task queuing and distributed semantic cache storage.
+4. **File Storage**: Uploaded files are saved to **AWS S3** buckets with SSE-KMS encryption at rest.
+5. **Secrets & Security**: API keys (`GROQ_API_KEY`, `JWT_SECRET_KEY`) managed via **AWS Secrets Manager**.
+6. **Telemetry & CI/CD**: Datadog / CloudWatch for metrics/APM tracing, and **GitHub Actions + ArgoCD** for automated rolling updates.
+
+---
+
+### Q57: How would you deploy this RAG application to Google Cloud Platform (GCP)?
+**Answer:**
+In GCP enterprise production:
+1. **Compute & Orchestration**: Deploy containers to **GCP GKE (Google Kubernetes Engine)** or **GCP Cloud Run** (for auto-scaling serverless containers to zero).
+2. **Load Balancing**: **GCP Cloud Load Balancing** with Cloud Armor WAF and Managed SSL Certificates.
+3. **Database Layer**:
+   - **Vector DB**: Qdrant Cloud on GCP or Vertex AI Vector Search.
+   - **Relational DB**: **GCP Cloud SQL for PostgreSQL** (Highly Available regional configuration).
+   - **Cache & Queue**: **GCP Memorystore for Redis**.
+4. **File Storage**: Uploaded documents stored in **GCP Cloud Storage (GCS)** buckets with customer-managed encryption keys (CMEK).
+5. **Secrets & Telemetry**: **GCP Secret Manager** for secrets, **Cloud Monitoring & Cloud Trace** for OpenTelemetry tracing, and **GCP Artifact Registry** for Docker containers.
+
+---
+
+### Q58: How do you enforce network security and VPC isolation in an enterprise cloud deployment?
+**Answer:**
+1. **Public vs. Private Subnets**:
+   - **Public Subnet**: Contains ONLY the Load Balancer (ALB) and CloudFront CDN.
+   - **Private Subnet**: Contains all Kubernetes worker nodes (FastAPI, Streamlit, Celery).
+   - **Database Private Subnet**: Databases (RDS PostgreSQL, ElastiCache Redis, Qdrant) sit in dedicated non-routable private subnets with zero public IP addresses.
+2. **Security Groups & Network Policies**: Database ports (`5432`, `6379`, `6333`) are restricted via security groups to accept traffic *only* from FastAPI container security group IDs.
+3. **Encryption**: Enforce TLS 1.3 in-transit for all internal pod-to-database connections, and KMS AES-256 encryption for all EBS volumes, RDS storage, and S3 objects.
+
+---
+
+### Q59: How do you scale vector search (Qdrant) and API pods when user concurrency increases by 100x?
+**Answer:**
+1. **API Tier Scaling**: Kubernetes HPA automatically scales FastAPI stateless pods from 3 to 50+ replicas based on CPU/RAM thresholds or Prometheus request queue length.
+2. **Vector DB Tier Scaling**: 
+   - Deploy Qdrant in a **Multi-Node Cluster** with read-replicas. Read operations (queries) are distributed across read nodes, while write operations (ingestions) hit primary nodes.
+   - **INT8 Scalar Quantization**: Keeps vector representations in RAM, enabling 4x higher point density per server node.
+3. **Caching Layer**: **ElastiCache Redis** handles semantic cache hits ($\ge 0.90$ similarity), serving up to 80% of repeated queries in $<50\text{ms}$ without ever touching Qdrant or Groq.
+
+---
+
+### Q60: How does the enterprise CI/CD pipeline work for automated testing and deployment?
+**Answer:**
+Our GitHub Actions CI/CD workflow follows 5 automated stages:
+1. **Linting & Code Quality**: Runs `black`, `flake8`, and `mypy` type checks.
+2. **Automated Testing**: Executes `pytest` unit tests for security guardrails, PII redactor tuples, RRF merging, and API endpoints.
+3. **Container & Security Scanning**: Builds Docker images and runs **Trivy** to scan for OS and Python library vulnerabilities.
+4. **Registry Push**: Tags images with git commit SHA and pushes to AWS ECR / GCP Artifact Registry.
+5. **Zero-Downtime Deployment**: ArgoCD triggers a rolling update on Kubernetes EKS (`kubectl set image`), ensuring new pods pass readiness probes before terminating old pods.
