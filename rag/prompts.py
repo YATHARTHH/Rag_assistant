@@ -4,6 +4,7 @@ import os
 
 logger = logging.getLogger("rag_api")
 
+
 def get_system_prompt(style: str) -> str:
     prompts_path = "./prompts.json"
     default_prompt = "You are a helpful AI assistant."
@@ -15,6 +16,7 @@ def get_system_prompt(style: str) -> str:
             return data.get(style, default_prompt)
     except Exception:
         return default_prompt
+
 
 def rewrite_query_with_history(query: str, chat_history: list[dict], llm) -> str:
     """
@@ -49,6 +51,7 @@ def rewrite_query_with_history(query: str, chat_history: list[dict], llm) -> str
         logger.warning(f"[PROMPTS] Error rewriting query: {e}")
     return query
 
+
 def generate_stepback_query(query: str, llm) -> str:
     """
     Generates a broader, abstracted version of the query for wider context retrieval (Step-Back Prompting).
@@ -67,6 +70,7 @@ Broader abstract question (respond with ONLY the broader question, no explanatio
         logger.warning(f"[PROMPTS] Error generating stepback query: {e}")
     return query
 
+
 def detect_multi_hop_query(query: str, llm) -> bool:
     """
     Detects if a query requires combining facts from multiple documents (multi-hop reasoning).
@@ -82,6 +86,7 @@ Respond with exactly one word: 'yes' or 'no'."""
     except Exception as e:
         logger.warning(f"[PROMPTS] Error detecting multi-hop: {e}")
     return False
+
 
 def classify_query_intent(query: str, llm) -> str:
     """

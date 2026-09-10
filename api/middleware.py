@@ -11,12 +11,17 @@ from slowapi import Limiter
 from slowapi.util import get_remote_address
 
 # Prometheus metrics definition
-LATENCY_HISTOGRAM = Histogram("rag_query_latency_seconds", "Total RAG request generation latency in seconds.")
-CACHE_COUNTER = Counter("rag_cache_hits_total", "Total semantic cache query interception hits.", ["result"])
+LATENCY_HISTOGRAM = Histogram(
+    "rag_query_latency_seconds", "Total RAG request generation latency in seconds."
+)
+CACHE_COUNTER = Counter(
+    "rag_cache_hits_total", "Total semantic cache query interception hits.", ["result"]
+)
 TOKEN_COUNTER = Counter("rag_tokens_usage_total", "Tokens consumed total counts.", ["type"])
 
 # Rate limiter setup
 limiter = Limiter(key_func=get_remote_address)
+
 
 # Logger Formatter
 class JsonFormatter(logging.Formatter):
@@ -26,11 +31,12 @@ class JsonFormatter(logging.Formatter):
             "level": record.levelname,
             "message": record.getMessage(),
             "name": record.name,
-            "correlation_id": getattr(record, "correlation_id", "None")
+            "correlation_id": getattr(record, "correlation_id", "None"),
         }
         if record.exc_info:
             log_data["exception"] = self.formatException(record.exc_info)
         return json.dumps(log_data)
+
 
 logger = logging.getLogger("rag_api")
 logger.setLevel(logging.INFO)
@@ -38,6 +44,7 @@ if not logger.handlers:
     handler = logging.StreamHandler(sys.stdout)
     handler.setFormatter(JsonFormatter())
     logger.addHandler(handler)
+
 
 async def request_logger_middleware(request: Request, call_next):
     """
@@ -51,7 +58,7 @@ async def request_logger_middleware(request: Request, call_next):
         duration = time.time() - start_time
         logger.info(
             f"HTTP {request.method} {request.url.path} finished in {duration:.4f}s with status {response.status_code}",
-            extra={"correlation_id": corr_id}
+            extra={"correlation_id": corr_id},
         )
         response.headers["X-Correlation-ID"] = corr_id
         return response
@@ -59,9 +66,8 @@ async def request_logger_middleware(request: Request, call_next):
         logger.error(
             f"Unhandled exception during request processing: {e}",
             exc_info=True,
-            extra={"correlation_id": corr_id}
+            extra={"correlation_id": corr_id},
         )
         return JSONResponse(
-            status_code=500,
-            content={"detail": "Internal Server Error", "correlation_id": corr_id}
+            status_code=500, content={"detail": "Internal Server Error", "correlation_id": corr_id}
         )

@@ -6,16 +6,19 @@ from database.sqlite import check_embedding_cache, save_embedding_cache
 
 logger = logging.getLogger("rag_api")
 
+
 def make_embedder() -> FastEmbedEmbeddings:
     """
     Creates a sentence transformer model to convert text into embeddings.
     """
     return FastEmbedEmbeddings(model_name="BAAI/bge-small-en-v1.5")
 
+
 class CachedHuggingFaceEmbeddings:
     """
     Wrapper around embedder that leverages SQLite caching for text embeddings.
     """
+
     def __init__(self, embedder):
         self.embedder = embedder
 
@@ -35,7 +38,7 @@ class CachedHuggingFaceEmbeddings:
 
         if texts_to_embed:
             embedded = self.embedder.embed_documents(texts_to_embed)
-            for idx, vector in zip(indices_to_embed, embedded):
+            for idx, vector in zip(indices_to_embed, embedded, strict=False):
                 save_embedding_cache(texts[idx], vector)
                 results[idx] = vector
 

@@ -1,4 +1,5 @@
 import pytest
+
 from rag.chunking import (
     chunk_document_text,
     cosine_similarity,

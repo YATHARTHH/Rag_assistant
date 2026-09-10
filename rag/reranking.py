@@ -5,6 +5,7 @@ from sentence_transformers import CrossEncoder
 
 logger = logging.getLogger("rag_api")
 
+
 def make_reranker() -> CrossEncoder:
     """
     Creates a local Cross-Encoder model to score and re-rank document relevance.
@@ -14,6 +15,7 @@ def make_reranker() -> CrossEncoder:
     except Exception as e:
         logger.warning(f"[RERANKER] Failed to load CrossEncoder due to memory/setup: {e}")
         return None
+
 
 def llm_rerank_fallback(query: str, sources: list, llm, top_k=3) -> list:
     """
@@ -29,14 +31,14 @@ def llm_rerank_fallback(query: str, sources: list, llm, top_k=3) -> list:
         Rate it on a scale from 1 (completely irrelevant) to 10 (perfectly answers the query).
 
         Query: "{query}"
-        Document Chunk: "{src['content']}"
+        Document Chunk: "{src["content"]}"
 
         Respond with ONLY a single integer between 1 and 10. Do NOT include any explanations or extra characters.
         """
         try:
             resp = llm.invoke(prompt)
             text = resp.content.strip()
-            match = re.search(r'\b(?:10|[1-9])\b', text)
+            match = re.search(r"\b(?:10|[1-9])\b", text)
             score = float(match.group()) if match else 1.0
             new_src = dict(src)
             new_src["rerank_score"] = score
@@ -50,6 +52,7 @@ def llm_rerank_fallback(query: str, sources: list, llm, top_k=3) -> list:
     scored_sources.sort(key=lambda x: x.get("rerank_score", 1.0), reverse=True)
     return scored_sources[:top_k]
 
+
 def rerank_documents(query: str, sources: list, reranker, llm=None, top_k=3) -> list:
     """
     Reranks a list of candidate documents based on Query-Passage scores.
@@ -62,7 +65,7 @@ def rerank_documents(query: str, sources: list, reranker, llm=None, top_k=3) -> 
         try:
             pairs = [[query, src["content"]] for src in sources]
             scores = reranker.predict(pairs)
-            for src, score in zip(sources, scores):
+            for src, score in zip(sources, scores, strict=False):
                 src["rerank_score"] = float(score)
             sources.sort(key=lambda x: x["rerank_score"], reverse=True)
             return sources[:top_k]

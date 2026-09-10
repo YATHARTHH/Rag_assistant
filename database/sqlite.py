@@ -4,6 +4,7 @@ import sqlite3
 
 USER_DB_PATH = "./users.db"
 
+
 def init_user_db():
     """
     Initializes the local SQLite database and associated tables.
@@ -59,6 +60,7 @@ def init_user_db():
     conn.commit()
     conn.close()
 
+
 def validate_password_strength(password: str) -> bool:
     if len(password) < 8:
         return False
@@ -68,11 +70,13 @@ def validate_password_strength(password: str) -> bool:
         return False
     return True
 
+
 def hash_password(password: str) -> str:
     """
     Hashes a password using SHA-256.
     """
     return hashlib.sha256(password.encode("utf-8")).hexdigest()
+
 
 def create_user(username: str, password: str, role: str = "readonly") -> bool:
     """
@@ -85,12 +89,16 @@ def create_user(username: str, password: str, role: str = "readonly") -> bool:
     try:
         conn = sqlite3.connect(USER_DB_PATH)
         cursor = conn.cursor()
-        cursor.execute("INSERT INTO users (username, password_hash, role) VALUES (?, ?, ?)", (username, h, role))
+        cursor.execute(
+            "INSERT INTO users (username, password_hash, role) VALUES (?, ?, ?)",
+            (username, h, role),
+        )
         conn.commit()
         conn.close()
         return True
     except sqlite3.IntegrityError:
         return False
+
 
 def verify_user(username: str, password: str) -> bool:
     """
@@ -107,7 +115,9 @@ def verify_user(username: str, password: str) -> bool:
         return True
     return False
 
+
 def check_embedding_cache(text: str) -> list[float] | None:
+    init_user_db()
     text_hash = hashlib.sha256(text.encode("utf-8")).hexdigest()
     try:
         conn = sqlite3.connect(USER_DB_PATH)
@@ -121,13 +131,18 @@ def check_embedding_cache(text: str) -> list[float] | None:
         pass
     return None
 
+
 def save_embedding_cache(text: str, vector: list[float]):
+    init_user_db()
     text_hash = hashlib.sha256(text.encode("utf-8")).hexdigest()
     vector_json = json.dumps(vector)
     try:
         conn = sqlite3.connect(USER_DB_PATH)
         cursor = conn.cursor()
-        cursor.execute("INSERT OR REPLACE INTO embedding_cache (text_hash, vector_json) VALUES (?, ?)", (text_hash, vector_json))
+        cursor.execute(
+            "INSERT OR REPLACE INTO embedding_cache (text_hash, vector_json) VALUES (?, ?)",
+            (text_hash, vector_json),
+        )
         conn.commit()
         conn.close()
     except Exception:

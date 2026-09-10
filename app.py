@@ -16,11 +16,12 @@ st.set_page_config(
     page_title="RAG AI Research Assistant",
     page_icon="📘",
     layout="wide",
-    initial_sidebar_state="expanded"
+    initial_sidebar_state="expanded",
 )
 
 # Custom CSS for Premium Design
-st.markdown("""
+st.markdown(
+    """
 <style>
     .reportview-container {
         background: #f5f7fb;
@@ -90,7 +91,9 @@ st.markdown("""
         font-weight: 500;
     }
 </style>
-""", unsafe_allow_html=True)
+""",
+    unsafe_allow_html=True,
+)
 
 # -------------------------
 # Sidebar: Auth, Settings & File Manager
@@ -110,7 +113,10 @@ with st.sidebar:
         if auth_mode == "Login":
             if st.button("Log In", use_container_width=True):
                 try:
-                    resp = requests.post(f"{API_URL}/auth/login", json={"username": username_in, "password": password_in})
+                    resp = requests.post(
+                        f"{API_URL}/auth/login",
+                        json={"username": username_in, "password": password_in},
+                    )
                     if resp.status_code == 200:
                         data = resp.json()
                         st.session_state.token = data["token"]
@@ -128,7 +134,10 @@ with st.sidebar:
         else:
             if st.button("Register Account", use_container_width=True):
                 try:
-                    resp = requests.post(f"{API_URL}/auth/signup", json={"username": username_in, "password": password_in})
+                    resp = requests.post(
+                        f"{API_URL}/auth/signup",
+                        json={"username": username_in, "password": password_in},
+                    )
                     if resp.status_code == 200:
                         st.success("✅ Account created! Switch to Login mode.")
                     else:
@@ -152,7 +161,7 @@ with st.sidebar:
     model_name = st.selectbox(
         "Language Model",
         options=["llama-3.3-70b-versatile", "llama-3.1-8b-instant", "mixtral-8x7b-32768"],
-        index=0
+        index=0,
     )
     temperature = st.slider("Temperature", min_value=0.0, max_value=1.0, value=0.2, step=0.1)
 
@@ -165,7 +174,7 @@ with st.sidebar:
         max_value=1.0,
         value=0.5,
         step=0.05,
-        help="0.0 = Keyword (BM25) only, 1.0 = Vector search only, 0.5 = RRF Fusion."
+        help="0.0 = Keyword (BM25) only, 1.0 = Vector search only, 0.5 = RRF Fusion.",
     )
     window_size = st.slider("Sentence Window Context", min_value=0, max_value=4, value=2)
 
@@ -175,7 +184,7 @@ with st.sidebar:
         min_value=top_k + 2,
         max_value=20,
         value=max(top_k * 3, 10),
-        disabled=not enable_reranking
+        disabled=not enable_reranking,
     )
 
     # Upgrades: Parent Document, HyDE, Step-Back, Prompt style
@@ -186,7 +195,7 @@ with st.sidebar:
     prompt_style = st.selectbox(
         "Assistant Prompt Style",
         options=["Strict Fact-Only", "General Assistant", "Technical Summary"],
-        index=0
+        index=0,
     )
 
     # 4. Asynchronous Document Ingestion
@@ -195,7 +204,7 @@ with st.sidebar:
     uploaded_files = st.file_uploader(
         "Add files to vector index",
         type=["txt", "pdf", "md", "docx", "csv", "json"],
-        accept_multiple_files=True
+        accept_multiple_files=True,
     )
 
     if uploaded_files:
@@ -207,14 +216,14 @@ with st.sidebar:
                         file_bytes = uploaded_file.read()
                         payload = {
                             "file_name": uploaded_file.name,
-                            "file_bytes_hex": file_bytes.hex()
+                            "file_bytes_hex": file_bytes.hex(),
                         }
                         resp = requests.post(f"{API_URL}/ingest", json=payload, headers=headers)
                         if resp.status_code == 200:
                             task_id = resp.json()["task_id"]
                             st.session_state.ingest_tasks[task_id] = {
                                 "file_name": uploaded_file.name,
-                                "status": "processing"
+                                "status": "processing",
                             }
                             st.session_state[state_key] = True
                             st.toast(f"📥 Queued in Celery worker: {uploaded_file.name}", icon="🚀")
@@ -282,7 +291,9 @@ with st.sidebar:
     # 8. Telemetry & Observability Links
     st.markdown("---")
     st.subheader("📊 Developer Telemetry")
-    st.markdown("[🔍 Open Arize Phoenix Tracing (Port 6006)](http://localhost:6006)", unsafe_allow_html=True)
+    st.markdown(
+        "[🔍 Open Arize Phoenix Tracing (Port 6006)](http://localhost:6006)", unsafe_allow_html=True
+    )
     st.markdown("[📈 Open Prometheus Metrics](/metrics)", unsafe_allow_html=True)
 
 # -------------------------
@@ -306,8 +317,15 @@ if "sessions_loaded" not in st.session_state:
 with tab_chat:
     # Historic Sessions Selector
     if "sessions_list" in st.session_state and st.session_state.sessions_list:
-        sess_options = {s["session_id"]: f"Session: {s['session_id'][:8]} ({s['created_at'][:16]})" for s in st.session_state.sessions_list}
-        selected_sess = st.selectbox("Restore Previous Chat Session", options=["New Chat"] + list(sess_options.keys()), format_func=lambda x: sess_options.get(x, "New Chat"))
+        sess_options = {
+            s["session_id"]: f"Session: {s['session_id'][:8]} ({s['created_at'][:16]})"
+            for s in st.session_state.sessions_list
+        }
+        selected_sess = st.selectbox(
+            "Restore Previous Chat Session",
+            options=["New Chat"] + list(sess_options.keys()),
+            format_func=lambda x: sess_options.get(x, "New Chat"),
+        )
 
         if selected_sess != "New Chat" and st.session_state.current_session_id != selected_sess:
             hist_resp = requests.get(f"{API_URL}/chat/history/{selected_sess}", headers=headers)
@@ -320,35 +338,55 @@ with tab_chat:
     for idx, message in enumerate(st.session_state.messages):
         with st.chat_message(message["role"]):
             if message.get("routing"):
-                st.markdown(f"<div class='routing-tag'>⚡ Route: {message['routing']}</div>", unsafe_allow_html=True)
+                st.markdown(
+                    f"<div class='routing-tag'>⚡ Route: {message['routing']}</div>",
+                    unsafe_allow_html=True,
+                )
             if message.get("filter") and message["filter"] != "None":
-                st.markdown(f"<div class='filter-tag'>📂 File Filter: {message['filter']}</div>", unsafe_allow_html=True)
+                st.markdown(
+                    f"<div class='filter-tag'>📂 File Filter: {message['filter']}</div>",
+                    unsafe_allow_html=True,
+                )
 
             st.markdown(message["content"])
 
             # Hallucination warning banner
             if message.get("eval") and message["eval"].get("faithfulness", 1.0) < 0.70:
-                st.markdown("<div class='hallucination-warning'>⚠️ Warning: Answer has high risk of hallucination (groundedness score < 0.70)</div>", unsafe_allow_html=True)
+                st.markdown(
+                    "<div class='hallucination-warning'>⚠️ Warning: Answer has high risk of hallucination (groundedness score < 0.70)</div>",
+                    unsafe_allow_html=True,
+                )
 
             # Render sources if present
             if message.get("sources"):
                 with st.expander("📄 View Grounding Sources"):
                     for i, src in enumerate(message["sources"], 1):
-                        st.markdown(f"""
+                        st.markdown(
+                            f"""
                         <div class="source-card">
-                            <strong>Source {i}: {src['title']}</strong> (Page {src.get('page', 1)} | Relevance: {src['similarity']:.2f})
-                            <p style="margin-top: 5px; font-size: 0.9em; color: #555;">{src['content']}</p>
+                            <strong>Source {i}: {src["title"]}</strong> (Page {src.get("page", 1)} | Relevance: {src["similarity"]:.2f})
+                            <p style="margin-top: 5px; font-size: 0.9em; color: #555;">{src["content"]}</p>
                         </div>
-                        """, unsafe_allow_html=True)
+                        """,
+                            unsafe_allow_html=True,
+                        )
 
             # Feedback loop triggers
             if message["role"] == "assistant" and "msg_id" in message:
                 f_col1, f_col2 = st.columns([0.05, 0.95])
                 if f_col1.button("👍", key=f"up_{idx}"):
-                    requests.post(f"{API_URL}/chat/feedback", json={"message_id": message["msg_id"], "rating": 1}, headers=headers)
+                    requests.post(
+                        f"{API_URL}/chat/feedback",
+                        json={"message_id": message["msg_id"], "rating": 1},
+                        headers=headers,
+                    )
                     st.toast("Submitted positive feedback!")
                 if f_col2.button("👎", key=f"down_{idx}"):
-                    requests.post(f"{API_URL}/chat/feedback", json={"message_id": message["msg_id"], "rating": -1}, headers=headers)
+                    requests.post(
+                        f"{API_URL}/chat/feedback",
+                        json={"message_id": message["msg_id"], "rating": -1},
+                        headers=headers,
+                    )
                     st.toast("Submitted negative feedback!")
 
     # Chat Input Box
@@ -378,7 +416,7 @@ with tab_chat:
                 "prompt_style": prompt_style,
                 "parent_retrieval": parent_retrieval,
                 "hyde": hyde,
-                "step_back": step_back
+                "step_back": step_back,
             }
 
             try:
@@ -401,24 +439,39 @@ with tab_chat:
                                 token = line_str[6:]
 
                                 # Intercept meta boundary data envelopes
-                                if token.startswith("__METADATA_START__") and token.endswith("__METADATA_END__"):
+                                if token.startswith("__METADATA_START__") and token.endswith(
+                                    "__METADATA_END__"
+                                ):
                                     meta_data = json.loads(token[18:-16])
                                     routing_info = meta_data["routing"]
                                     filter_info = meta_data["filter"]
                                     sources = meta_data["sources"]
 
                                     # Show route details dynamically
-                                    st.markdown(f"<div class='routing-tag'>⚡ Route: {routing_info}</div>", unsafe_allow_html=True)
+                                    st.markdown(
+                                        f"<div class='routing-tag'>⚡ Route: {routing_info}</div>",
+                                        unsafe_allow_html=True,
+                                    )
                                     if filter_info != "None":
-                                        st.markdown(f"<div class='filter-tag'>📂 File Filter: {filter_info}</div>", unsafe_allow_html=True)
+                                        st.markdown(
+                                            f"<div class='filter-tag'>📂 File Filter: {filter_info}</div>",
+                                            unsafe_allow_html=True,
+                                        )
 
                                 # Intercept evaluation results boundary envelope
-                                elif token.startswith("__EVAL_START__") and token.endswith("__EVAL_END__"):
+                                elif token.startswith("__EVAL_START__") and token.endswith(
+                                    "__EVAL_END__"
+                                ):
                                     eval_scores = json.loads(token[14:-12])
-                                    st.caption(f"📊 Evaluation scores: Groundedness/Faithfulness: {eval_scores['faithfulness']:.2f} | Answer Relevance: {eval_scores['relevance']:.2f} | Context Precision: {eval_scores['precision']:.2f}")
+                                    st.caption(
+                                        f"📊 Evaluation scores: Groundedness/Faithfulness: {eval_scores['faithfulness']:.2f} | Answer Relevance: {eval_scores['relevance']:.2f} | Context Precision: {eval_scores['precision']:.2f}"
+                                    )
 
-                                    if eval_scores['faithfulness'] < 0.70:
-                                        st.markdown("<div class='hallucination-warning'>⚠️ Warning: Answer has high risk of hallucination (groundedness score < 0.70)</div>", unsafe_allow_html=True)
+                                    if eval_scores["faithfulness"] < 0.70:
+                                        st.markdown(
+                                            "<div class='hallucination-warning'>⚠️ Warning: Answer has high risk of hallucination (groundedness score < 0.70)</div>",
+                                            unsafe_allow_html=True,
+                                        )
                                 else:
                                     full_response += token
                                     response_placeholder.markdown(full_response + "▌")
@@ -429,23 +482,28 @@ with tab_chat:
                     if sources:
                         with st.expander("📄 View Grounding Sources"):
                             for i, src in enumerate(sources, 1):
-                                st.markdown(f"""
+                                st.markdown(
+                                    f"""
                                 <div class="source-card">
-                                    <strong>Source {i}: {src['title']}</strong> (Page {src.get('page', 1)} | Relevance: {src['similarity']:.2f})
-                                    <p style="margin-top: 5px; font-size: 0.9em; color: #555;">{src['content']}</p>
+                                    <strong>Source {i}: {src["title"]}</strong> (Page {src.get("page", 1)} | Relevance: {src["similarity"]:.2f})
+                                    <p style="margin-top: 5px; font-size: 0.9em; color: #555;">{src["content"]}</p>
                                 </div>
-                                """, unsafe_allow_html=True)
+                                """,
+                                    unsafe_allow_html=True,
+                                )
 
                     # Save response back to memory state
-                    st.session_state.messages.append({
-                        "role": "assistant",
-                        "content": full_response,
-                        "sources": sources if sources else None,
-                        "routing": routing_info,
-                        "filter": filter_info,
-                        "eval": eval_scores,
-                        "msg_id": msg_id
-                    })
+                    st.session_state.messages.append(
+                        {
+                            "role": "assistant",
+                            "content": full_response,
+                            "sources": sources if sources else None,
+                            "routing": routing_info,
+                            "filter": filter_info,
+                            "eval": eval_scores,
+                            "msg_id": msg_id,
+                        }
+                    )
                     st.rerun()
                 else:
                     status_placeholder.empty()
@@ -461,7 +519,7 @@ with tab_chat:
             label="📥 Export Chat History (JSON)",
             data=chat_json,
             file_name=f"chat_history_{st.session_state.username}.json",
-            mime="application/json"
+            mime="application/json",
         )
 
 # -------------------------
@@ -469,16 +527,21 @@ with tab_chat:
 # -------------------------
 with tab_eval:
     st.header("📊 Automated RAG Evaluation Dashboard")
-    st.markdown("Provides continuous monitoring of RAG retrieval quality and answer groundedness using LLM-as-a-Judge evaluators.")
+    st.markdown(
+        "Provides continuous monitoring of RAG retrieval quality and answer groundedness using LLM-as-a-Judge evaluators."
+    )
     st.markdown("---")
 
     rag_messages = [
-        msg for msg in st.session_state.messages
+        msg
+        for msg in st.session_state.messages
         if msg["role"] == "assistant" and msg.get("eval") is not None
     ]
 
     if not rag_messages:
-        st.info("💡 **No RAG-based queries have been logged yet.** Run a retrieval question in the Chat tab to view evaluations.")
+        st.info(
+            "💡 **No RAG-based queries have been logged yet.** Run a retrieval question in the Chat tab to view evaluations."
+        )
     else:
         avg_faithfulness = sum(m["eval"]["faithfulness"] for m in rag_messages) / len(rag_messages)
         avg_relevance = sum(m["eval"]["relevance"] for m in rag_messages) / len(rag_messages)
@@ -491,15 +554,17 @@ with tab_eval:
 
         st.markdown("### 📈 Metric Performance Over Time")
 
-        chart_data = pd.DataFrame([
-            {
-                "Turn": idx + 1,
-                "Faithfulness": msg["eval"]["faithfulness"],
-                "Relevance": msg["eval"]["relevance"],
-                "Context Precision": msg["eval"]["precision"]
-            }
-            for idx, msg in enumerate(rag_messages)
-        ])
+        chart_data = pd.DataFrame(
+            [
+                {
+                    "Turn": idx + 1,
+                    "Faithfulness": msg["eval"]["faithfulness"],
+                    "Relevance": msg["eval"]["relevance"],
+                    "Context Precision": msg["eval"]["precision"],
+                }
+                for idx, msg in enumerate(rag_messages)
+            ]
+        )
 
         st.line_chart(chart_data.set_index("Turn"))
 
@@ -508,14 +573,18 @@ with tab_eval:
         log_records = []
         for msg in rag_messages:
             msg_idx = st.session_state.messages.index(msg)
-            user_query = st.session_state.messages[msg_idx - 1]["content"] if msg_idx > 0 else "Unknown"
+            user_query = (
+                st.session_state.messages[msg_idx - 1]["content"] if msg_idx > 0 else "Unknown"
+            )
 
-            log_records.append({
-                "User Query": user_query,
-                "Active Filter": msg.get("filter", "None"),
-                "Faithfulness": f"{msg['eval']['faithfulness']:.2f}",
-                "Relevance": f"{msg['eval']['relevance']:.2f}",
-                "Context Precision": f"{msg['eval']['precision']:.2f}"
-            })
+            log_records.append(
+                {
+                    "User Query": user_query,
+                    "Active Filter": msg.get("filter", "None"),
+                    "Faithfulness": f"{msg['eval']['faithfulness']:.2f}",
+                    "Relevance": f"{msg['eval']['relevance']:.2f}",
+                    "Context Precision": f"{msg['eval']['precision']:.2f}",
+                }
+            )
 
         st.dataframe(pd.DataFrame(log_records), use_container_width=True)

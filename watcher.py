@@ -20,10 +20,11 @@ class DocFolderHandler(FileSystemEventHandler):
         fname = os.path.basename(file_path)
         ext = os.path.splitext(fname)[1].lower()
         # Filter for document types
-        if ext in ('.txt', '.pdf', '.md', '.docx', '.csv', '.html', '.json'):
+        if ext in (".txt", ".pdf", ".md", ".docx", ".csv", ".html", ".json"):
             print(f"[WATCHDOG] Detected change in: {fname}. Queueing ingestion...")
             # Trigger Celery background task under public user
             ingest_file_task.delay(file_path, fname, "public")
+
 
 if __name__ == "__main__":
     docs_dir = "./docs"

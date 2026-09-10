@@ -12,7 +12,7 @@ from unstructured.partition.auto import partition
 celery_app = Celery(
     "tasks",
     broker=os.getenv("REDIS_URL", "redis://127.0.0.1:6379/0"),
-    backend=os.getenv("REDIS_URL", "redis://127.0.0.1:6379/0")
+    backend=os.getenv("REDIS_URL", "redis://127.0.0.1:6379/0"),
 )
 
 # Tasks queue settings
@@ -53,7 +53,7 @@ def get_file_metadata(file_path: str, content: str = "") -> dict:
         "author": author,
         "creation_date": creation_date,
         "file_size_kb": file_size_kb,
-        "page_count": page_count
+        "page_count": page_count,
     }
 
 
@@ -81,7 +81,7 @@ def ingest_file_task(file_path: str, filename: str, username: str):
         "filename": filename,
         "username": username,
         "file_path": file_path,
-        "doc_metadata": doc_metadata
+        "doc_metadata": doc_metadata,
     }
 
 
@@ -149,4 +149,3 @@ def parse_file_content(file_path: str) -> str:
     else:
         with open(file_path, encoding="utf-8", errors="ignore") as f:
             return f.read()
-

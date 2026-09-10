@@ -9,26 +9,32 @@ from fastapi.middleware.cors import CORSMiddleware
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 
-# Load env variables
-load_dotenv()
-
-# Import local packages
 from api.middleware import limiter, logger, request_logger_middleware
 from api.routing import router
+
+# Load env variables
+load_dotenv()
 
 # -------------------------
 # Startup Validations
 # -------------------------
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 if not GROQ_API_KEY:
-    print(json.dumps({"level": "CRITICAL", "message": "CRITICAL: GROQ_API_KEY environment variable is missing!"}))
+    print(
+        json.dumps(
+            {
+                "level": "CRITICAL",
+                "message": "CRITICAL: GROQ_API_KEY environment variable is missing!",
+            }
+        )
+    )
     sys.exit(1)
 
 # Initialize FastAPI App
 app = FastAPI(
     title="RAG AI Backend API",
     description="Enterprise-grade modular RAG API with hybrid retrieval, step-back prompting, evaluation, and security guardrails.",
-    version="1.0.0"
+    version="1.0.0",
 )
 
 # Wire Limiter & Middleware
@@ -55,13 +61,17 @@ app.include_router(router)
 try:
     import phoenix as px
     from openinference.instrumentation.langchain import LangChainInstrumentor
+
     _phoenix_session = px.launch_app()
     LangChainInstrumentor().instrument()
     logger.info("Arize Phoenix tracing active at http://localhost:6006")
 except ImportError:
-    logger.warning("Arize Phoenix not installed — skipping tracing. pip install arize-phoenix openinference-instrumentation-langchain")
+    logger.warning(
+        "Arize Phoenix not installed — skipping tracing. pip install arize-phoenix openinference-instrumentation-langchain"
+    )
 except Exception as _phoenix_err:
     logger.warning(f"Arize Phoenix failed to launch: {_phoenix_err}")
+
 
 # -------------------------
 # Graceful Shutdown Handler
@@ -71,9 +81,11 @@ def _shutdown_handler():
     logger.info("[SHUTDOWN] Graceful shutdown initiated. Flushing pending Celery tasks...")
     try:
         from tasks import celery_app as _celery_app
+
         _celery_app.control.broadcast("shutdown", reply=False)
     except Exception:
         pass
     logger.info("[SHUTDOWN] Shutdown complete.")
+
 
 atexit.register(_shutdown_handler)

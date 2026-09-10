@@ -3,6 +3,7 @@ import re
 
 logger = logging.getLogger("rag_api")
 
+
 def evaluate_faithfulness(context: str, answer: str, llm) -> float:
     """
     Evaluates if the answer is grounded in the retrieved context.
@@ -25,13 +26,14 @@ def evaluate_faithfulness(context: str, answer: str, llm) -> float:
     try:
         response = llm.invoke(prompt)
         text = response.content.strip()
-        match = re.search(r'\d+\.\d+|\d+', text)
+        match = re.search(r"\d+\.\d+|\d+", text)
         if match:
             score = float(match.group())
             return max(0.0, min(1.0, score))
     except Exception as e:
         logger.warning(f"[EVALUATION] Faithfulness failed: {e}")
     return 1.0
+
 
 def evaluate_answer_relevance(query: str, answer: str, llm) -> float:
     """
@@ -52,13 +54,14 @@ def evaluate_answer_relevance(query: str, answer: str, llm) -> float:
     try:
         response = llm.invoke(prompt)
         text = response.content.strip()
-        match = re.search(r'\d+\.\d+|\d+', text)
+        match = re.search(r"\d+\.\d+|\d+", text)
         if match:
             score = float(match.group())
             return max(0.0, min(1.0, score))
     except Exception as e:
         logger.warning(f"[EVALUATION] Answer relevance failed: {e}")
     return 1.0
+
 
 def evaluate_context_precision(query: str, context: str, llm) -> float:
     """
@@ -80,7 +83,7 @@ def evaluate_context_precision(query: str, context: str, llm) -> float:
     try:
         response = llm.invoke(prompt)
         text = response.content.strip()
-        match = re.search(r'\d+\.\d+|\d+', text)
+        match = re.search(r"\d+\.\d+|\d+", text)
         if match:
             score = float(match.group())
             return max(0.0, min(1.0, score))

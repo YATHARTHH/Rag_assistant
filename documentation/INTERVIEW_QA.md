@@ -49,7 +49,7 @@ Multi-tenancy is enforced at two distinct security boundaries:
        models.Filter(
            should=[
                models.FieldCondition(key="user_id", match=models.MatchValue(value=username)),
-               models.FieldCondition(key="user_id", match=models.MatchValue(value="public"))
+               models.FieldCondition(key="user_id", match=models.MatchValue(value="public")),
            ]
        )
    ]
@@ -412,7 +412,10 @@ Metric scores ($0.00$ to $1.00$) are returned and stored alongside the chat reco
 In `app.py`, the chat rendering loop inspects the evaluation metadata attached to each message:
 ```python
 if message.get("eval") and message["eval"].get("faithfulness", 1.0) < 0.70:
-    st.markdown("<div class='hallucination-warning'>⚠️ Warning: Answer has high risk of hallucination (groundedness score < 0.70)</div>", unsafe_allow_html=True)
+    st.markdown(
+        "<div class='hallucination-warning'>⚠️ Warning: Answer has high risk of hallucination (groundedness score < 0.70)</div>",
+        unsafe_allow_html=True,
+    )
 ```
 If Faithfulness is $<0.70$, Streamlit automatically displays a prominent **Hallucination Warning Banner** below the message, alerting the user to double-check sources.
 

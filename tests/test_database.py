@@ -14,12 +14,14 @@ def test_password_strength_validation():
     assert validate_password_strength("NOCAPITALDIGITS") is False
     assert validate_password_strength("ValidPassword123") is True
 
+
 def test_password_hashing():
     h1 = hash_password("MySecretPass1")
     h2 = hash_password("MySecretPass1")
     h3 = hash_password("DifferentPass1")
     assert h1 == h2
     assert h1 != h3
+
 
 def test_user_creation_and_verification():
     username = "test_user_ci"
@@ -41,6 +43,7 @@ def test_user_creation_and_verification():
     assert verify_user(username, password) is True
     assert verify_user(username, "WrongPassword123") is False
     assert verify_user("nonexistent_user", password) is False
+
 
 def test_embedding_cache_operations():
     text = "Query string to cache vector embeddings."

@@ -51,11 +51,13 @@ client = get_qdrant_client()
 embedder = make_embedder()
 RERANKER_MODEL = None
 
+
 def get_reranker_lazy():
     global RERANKER_MODEL
     if RERANKER_MODEL is None:
         RERANKER_MODEL = make_reranker()
     return RERANKER_MODEL
+
 
 # Request Models
 class SignupRequest(BaseModel):
@@ -63,13 +65,16 @@ class SignupRequest(BaseModel):
     password: str
     role: str | None = "readonly"
 
+
 class LoginRequest(BaseModel):
     username: str
     password: str
 
+
 class ChatMessage(BaseModel):
     role: str
     content: str
+
 
 class ChatRequest(BaseModel):
     query: str
@@ -87,14 +92,17 @@ class ChatRequest(BaseModel):
     hyde: bool | None = False
     step_back: bool | None = False
 
+
 class IngestRequest(BaseModel):
     file_name: str
     file_bytes_hex: str
+
 
 class FeedbackRequest(BaseModel):
     message_id: str
     rating: int
     feedback_text: str | None = None
+
 
 # Exponential Backoff Retry Helper
 def with_retry(func, *args, max_retries: int = 3, **kwargs):
@@ -103,11 +111,16 @@ def with_retry(func, *args, max_retries: int = 3, **kwargs):
             return func(*args, **kwargs)
         except Exception as exc:
             if attempt == max_retries - 1:
-                logger.warning(f"[RETRY] {func.__name__} failed after {max_retries} attempts: {exc}")
+                logger.warning(
+                    f"[RETRY] {func.__name__} failed after {max_retries} attempts: {exc}"
+                )
                 raise
-            wait = 2 ** attempt
-            logger.warning(f"[RETRY] {func.__name__} attempt {attempt + 1} failed, retrying in {wait}s...")
+            wait = 2**attempt
+            logger.warning(
+                f"[RETRY] {func.__name__} attempt {attempt + 1} failed, retrying in {wait}s..."
+            )
             time.sleep(wait)
+
 
 # Context Window Truncation
 def truncate_context(context: str, max_tokens: int = 6000) -> str:
@@ -116,13 +129,23 @@ def truncate_context(context: str, max_tokens: int = 6000) -> str:
     if estimated_tokens <= max_tokens:
         return context
     allowed_words = int(max_tokens / 1.3)
-    logger.warning(f"[CTX TRUNCATE] Reduced context from ~{estimated_tokens} to ~{max_tokens} estimated tokens.")
+    logger.warning(
+        f"[CTX TRUNCATE] Reduced context from ~{estimated_tokens} to ~{max_tokens} estimated tokens."
+    )
     return " ".join(words[:allowed_words]) + "\n[...context truncated to fit token window...]"
 
+
 # Endpoints
-@router.get("/health", tags=["Observability"], summary="Checks server and dependency health statuses.")
+@router.get(
+    "/health", tags=["Observability"], summary="Checks server and dependency health statuses."
+)
 def health_check():
-    status_data = {"status": "healthy", "redis": "healthy", "qdrant": "healthy", "sqlite": "healthy"}
+    status_data = {
+        "status": "healthy",
+        "redis": "healthy",
+        "qdrant": "healthy",
+        "sqlite": "healthy",
+    }
     try:
         conn = sqlite3.connect(USER_DB_PATH)
         conn.execute("SELECT 1")
@@ -141,7 +164,10 @@ def health_check():
         raise HTTPException(status_code=500, detail=status_data)
     return status_data
 
-@router.post("/auth/signup", tags=["Auth"], summary="Sign up a new user account with password validation.")
+
+@router.post(
+    "/auth/signup", tags=["Auth"], summary="Sign up a new user account with password validation."
+)
 def auth_signup(req: SignupRequest):
     if not req.username or not req.password:
         raise HTTPException(status_code=400, detail="Username and password are required.")
@@ -149,11 +175,14 @@ def auth_signup(req: SignupRequest):
     if not success:
         raise HTTPException(
             status_code=400,
-            detail="Username already exists or password is too weak (must be at least 8 characters, containing uppercase and a digit)."
+            detail="Username already exists or password is too weak (must be at least 8 characters, containing uppercase and a digit).",
         )
     return {"message": "User registered successfully."}
 
-@router.post("/auth/login", tags=["Auth"], summary="Authenticate credentials and return a signed JWT token.")
+
+@router.post(
+    "/auth/login", tags=["Auth"], summary="Authenticate credentials and return a signed JWT token."
+)
 def auth_login(req: LoginRequest):
     valid = verify_user(req.username, req.password)
     if not valid:
@@ -169,17 +198,28 @@ def auth_login(req: LoginRequest):
     token = create_access_token({"username": req.username, "role": role})
     return {"token": token, "username": req.username, "role": role}
 
-@router.post("/ingest", tags=["Ingestion"], summary="Queue a file for background Celery parsing and Qdrant vector indexing.")
+
+@router.post(
+    "/ingest",
+    tags=["Ingestion"],
+    summary="Queue a file for background Celery parsing and Qdrant vector indexing.",
+)
 @limiter.limit("5/minute")
-def start_ingest(request: Request, req: IngestRequest, background_tasks: BackgroundTasks, username: str = Depends(get_current_user)):
+def start_ingest(
+    request: Request,
+    req: IngestRequest,
+    background_tasks: BackgroundTasks,
+    username: str = Depends(get_current_user),
+):
     from tasks import ingest_file_task
+
     if len(req.file_bytes_hex) > 20 * 1024 * 1024:
         raise HTTPException(status_code=400, detail="File too large. Max size is 10MB.")
 
     try:
         file_bytes = bytes.fromhex(req.file_bytes_hex)
-    except Exception:
-        raise HTTPException(status_code=400, detail="Invalid file bytes hex format.")
+    except Exception as err:
+        raise HTTPException(status_code=400, detail="Invalid file bytes hex format.") from err
 
     temp_dir = "./temp_uploads"
     os.makedirs(temp_dir, exist_ok=True)
@@ -191,7 +231,9 @@ def start_ingest(request: Request, req: IngestRequest, background_tasks: Backgro
         task = ingest_file_task.delay(temp_path, req.file_name, username)
         return {"task_id": task.id, "status": "queued"}
     except Exception as exc:
-        logger.warning(f"[INGEST] Celery queue failed (Redis offline?), falling back to local background thread: {exc}")
+        logger.warning(
+            f"[INGEST] Celery queue failed (Redis offline?), falling back to local background thread: {exc}"
+        )
         task_id = f"local_{uuid.uuid4().hex[:12]}"
 
         def local_ingestion_worker():
@@ -205,21 +247,31 @@ def start_ingest(request: Request, req: IngestRequest, background_tasks: Backgro
                     chunks = parent_child_chunking(content, filename, embedder)
                     if chunks:
                         delete_file_from_qdrant(client, filename, username)
-                        add_chunks_to_qdrant(client, chunks, username, embedder, doc_metadata=doc_metadata)
+                        add_chunks_to_qdrant(
+                            client, chunks, username, embedder, doc_metadata=doc_metadata
+                        )
                         invalidate_semantic_cache_by_file(client, filename)
                     logger.info(f"[INGEST] Local background ingestion completed for {filename}")
             except Exception as worker_err:
-                logger.error(f"[INGEST] Local background ingestion failed for {req.file_name}: {worker_err}")
+                logger.error(
+                    f"[INGEST] Local background ingestion failed for {req.file_name}: {worker_err}"
+                )
 
         background_tasks.add_task(local_ingestion_worker)
         return {"task_id": task_id, "status": "completed"}
 
-@router.get("/ingest/status/{task_id}", tags=["Ingestion"], summary="Poll Celery task status for background indexing job.")
+
+@router.get(
+    "/ingest/status/{task_id}",
+    tags=["Ingestion"],
+    summary="Poll Celery task status for background indexing job.",
+)
 def check_ingest_status(task_id: str, username: str = Depends(get_current_user)):
     if task_id.startswith("local_"):
         return {"task_id": task_id, "status": "completed"}
 
     from tasks import ingest_file_task
+
     task_res = ingest_file_task.AsyncResult(task_id)
     state = task_res.state
 
@@ -234,7 +286,9 @@ def check_ingest_status(task_id: str, username: str = Depends(get_current_user))
                 chunks = parent_child_chunking(content, filename, embedder)
                 if chunks:
                     delete_file_from_qdrant(client, filename, username)
-                    add_chunks_to_qdrant(client, chunks, username, embedder, doc_metadata=doc_metadata)
+                    add_chunks_to_qdrant(
+                        client, chunks, username, embedder, doc_metadata=doc_metadata
+                    )
                     invalidate_semantic_cache_by_file(client, filename)
 
                 INDEXED_TASKS.add(task_id)
@@ -244,21 +298,26 @@ def check_ingest_status(task_id: str, username: str = Depends(get_current_user))
         "PENDING": "processing",
         "STARTED": "processing",
         "RETRY": "processing",
-        "FAILURE": "error"
+        "FAILURE": "error",
     }
     status = status_map.get(state, "processing")
     if state == "FAILURE":
         return {"task_id": task_id, "status": f"error: {task_res.result}"}
     return {"task_id": task_id, "status": status}
 
-@router.get("/db/stats", tags=["Database Management"], summary="Retrieves document names and index sizes for tenant.")
+
+@router.get(
+    "/db/stats",
+    tags=["Database Management"],
+    summary="Retrieves document names and index sizes for tenant.",
+)
 def get_db_stats(username: str = Depends(get_current_user)):
     try:
         must_cond = [
             models.Filter(
                 should=[
                     models.FieldCondition(key="user_id", match=models.MatchValue(value=username)),
-                    models.FieldCondition(key="user_id", match=models.MatchValue(value="public"))
+                    models.FieldCondition(key="user_id", match=models.MatchValue(value="public")),
                 ]
             )
         ]
@@ -266,26 +325,28 @@ def get_db_stats(username: str = Depends(get_current_user)):
             collection_name="research_papers",
             scroll_filter=models.Filter(must=must_cond),
             limit=5000,
-            with_payload=True
+            with_payload=True,
         )
         if scroll_res and scroll_res[0]:
-            unique_files = list(set(
-                item.payload.get("title", "Unknown")
-                for item in scroll_res[0]
-            ))
+            unique_files = list(set(item.payload.get("title", "Unknown") for item in scroll_res[0]))
             return {"total_chunks": len(scroll_res[0]), "unique_files": unique_files}
     except Exception:
         pass
     return {"total_chunks": 0, "unique_files": []}
 
-@router.get("/db/token_usage", tags=["Database Management"], summary="Retrieves total token usage statistics and cost estimations.")
+
+@router.get(
+    "/db/token_usage",
+    tags=["Database Management"],
+    summary="Retrieves total token usage statistics and cost estimations.",
+)
 def get_token_usage_stats(username: str = Depends(get_current_user)):
     try:
         conn = sqlite3.connect(USER_DB_PATH)
         cursor = conn.cursor()
         cursor.execute(
             "SELECT COUNT(*), SUM(prompt_tokens), SUM(completion_tokens), SUM(total_tokens) FROM token_usage WHERE username = ?",
-            (username,)
+            (username,),
         )
         row = cursor.fetchone()
         conn.close()
@@ -298,7 +359,7 @@ def get_token_usage_stats(username: str = Depends(get_current_user)):
                 "prompt_tokens": prompt,
                 "completion_tokens": completion,
                 "total_tokens": total,
-                "estimated_cost_usd": round(cost, 5)
+                "estimated_cost_usd": round(cost, 5),
             }
     except Exception:
         pass
@@ -307,72 +368,106 @@ def get_token_usage_stats(username: str = Depends(get_current_user)):
         "prompt_tokens": 0,
         "completion_tokens": 0,
         "total_tokens": 0,
-        "estimated_cost_usd": 0.0
+        "estimated_cost_usd": 0.0,
     }
 
-@router.delete("/db/files/{file_name}", tags=["Database Management"], summary="Deletes a specific document's chunks from vector store.")
+
+@router.delete(
+    "/db/files/{file_name}",
+    tags=["Database Management"],
+    summary="Deletes a specific document's chunks from vector store.",
+)
 def delete_file(file_name: str, username: str = Depends(get_current_user)):
     try:
         delete_file_from_qdrant(client, file_name, username)
         invalidate_semantic_cache_by_file(client, file_name)
         return {"message": f"Successfully deleted '{file_name}' from RAG index."}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
-@router.post("/db/clear", tags=["Database Management"], summary="Clears all chunks uploaded by current tenant.")
+
+@router.post(
+    "/db/clear",
+    tags=["Database Management"],
+    summary="Clears all chunks uploaded by current tenant.",
+)
 def clear_user_db(username: str = Depends(get_current_user)):
     try:
         client.delete(
             collection_name="research_papers",
             points_selector=models.Filter(
                 must=[models.FieldCondition(key="user_id", match=models.MatchValue(value=username))]
-            )
+            ),
         )
         return {"message": "All database chunks cleared successfully."}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
-@router.get("/chat/sessions", tags=["Chat History"], summary="Lists all past chat sessions for user.")
+
+@router.get(
+    "/chat/sessions", tags=["Chat History"], summary="Lists all past chat sessions for user."
+)
 def list_chat_sessions(username: str = Depends(get_current_user)):
     try:
         conn = sqlite3.connect(USER_DB_PATH)
         cursor = conn.cursor()
-        cursor.execute("SELECT DISTINCT session_id, timestamp FROM chat_history WHERE username = ? ORDER BY timestamp DESC", (username,))
+        cursor.execute(
+            "SELECT DISTINCT session_id, timestamp FROM chat_history WHERE username = ? ORDER BY timestamp DESC",
+            (username,),
+        )
         rows = cursor.fetchall()
         conn.close()
         return [{"session_id": r[0], "created_at": r[1]} for r in rows]
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
-@router.get("/chat/history/{session_id}", tags=["Chat History"], summary="Retrieves full log of chat session.")
+
+@router.get(
+    "/chat/history/{session_id}",
+    tags=["Chat History"],
+    summary="Retrieves full log of chat session.",
+)
 def get_chat_history(session_id: str, username: str = Depends(get_current_user)):
     try:
         conn = sqlite3.connect(USER_DB_PATH)
         cursor = conn.cursor()
-        cursor.execute("SELECT role, content FROM chat_history WHERE username = ? AND session_id = ? ORDER BY id ASC", (username, session_id))
+        cursor.execute(
+            "SELECT role, content FROM chat_history WHERE username = ? AND session_id = ? ORDER BY id ASC",
+            (username, session_id),
+        )
         rows = cursor.fetchall()
         conn.close()
         return [{"role": r[0], "content": r[1]} for r in rows]
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
-@router.post("/chat/feedback", tags=["Chat History"], summary="Submit rating feedback for a response message.")
+
+@router.post(
+    "/chat/feedback",
+    tags=["Chat History"],
+    summary="Submit rating feedback for a response message.",
+)
 def post_chat_feedback(req: FeedbackRequest, username: str = Depends(get_current_user)):
     try:
         conn = sqlite3.connect(USER_DB_PATH)
         cursor = conn.cursor()
-        cursor.execute("INSERT INTO feedback (username, message_id, rating, feedback_text) VALUES (?, ?, ?, ?)",
-                       (username, req.message_id, req.rating, req.feedback_text))
+        cursor.execute(
+            "INSERT INTO feedback (username, message_id, rating, feedback_text) VALUES (?, ?, ?, ?)",
+            (username, req.message_id, req.rating, req.feedback_text),
+        )
         conn.commit()
         conn.close()
         return {"message": "Feedback submitted successfully."}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
+
 
 @router.get("/metrics", tags=["Observability"], summary="Exposes Prometheus metrics endpoint.")
 def get_metrics():
     from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
+
     return Response(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)
+
 
 def run_web_search(query: str, max_results: int = 3) -> list[dict]:
     """
@@ -381,23 +476,31 @@ def run_web_search(query: str, max_results: int = 3) -> list[dict]:
     logger.info(f"[CRAG] Running web search for: {query[:80]}")
     try:
         from ddgs import DDGS
+
         d = DDGS()
         results = list(d.text(query, max_results=max_results))
         sources = []
         for idx, r in enumerate(results):
-            sources.append({
-                "title": f"Web: {r.get('title', 'Search Result')}",
-                "content": r.get("body", ""),
-                "similarity": 0.85 - (idx * 0.05),
-                "page": r.get("href", "http://duckduckgo.com")
-            })
+            sources.append(
+                {
+                    "title": f"Web: {r.get('title', 'Search Result')}",
+                    "content": r.get("body", ""),
+                    "similarity": 0.85 - (idx * 0.05),
+                    "page": r.get("href", "http://duckduckgo.com"),
+                }
+            )
         logger.info(f"[CRAG] Web search returned {len(sources)} results.")
         return sources
     except Exception as e:
         logger.warning(f"[CRAG] DuckDuckGo search fallback failed: {e}")
         return []
 
-@router.post("/chat", tags=["Core RAG"], summary="Streams chat responses using Server-Sent Events (SSE) event formats.")
+
+@router.post(
+    "/chat",
+    tags=["Core RAG"],
+    summary="Streams chat responses using Server-Sent Events (SSE) event formats.",
+)
 @limiter.limit("10/minute")
 def chat_endpoint(request: Request, req: ChatRequest, username: str = Depends(get_current_user)):
     # 0. PII Redaction with mapping tracking
@@ -409,6 +512,7 @@ def chat_endpoint(request: Request, req: ChatRequest, username: str = Depends(ge
     # 2. Input Safety Guardrail check
     GROQ_KEY = os.getenv("GROQ_API_KEY", "")
     from langchain_groq import ChatGroq
+
     llm = ChatGroq(
         temperature=req.temperature,
         groq_api_key=GROQ_KEY,
@@ -417,14 +521,17 @@ def chat_endpoint(request: Request, req: ChatRequest, username: str = Depends(ge
 
     is_safe_input = check_safety_guardrails(redacted_query, llm)
     if not is_safe_input:
+
         def err_stream():
             yield "Error: Input violates safety guardrail policy."
+
         return EventSourceResponse(err_stream())
 
     # Check Semantic cache
     cached_ans, sim = check_semantic_cache(client, redacted_query, embedder, score_threshold=0.90)
     if cached_ans:
         CACHE_COUNTER.labels(result="hit").inc()
+
         def cache_stream():
             yield f"[Semantic Cache Hit (Similarity: {sim:.2f})]"
             # Restore PII in cached response before yielding
@@ -433,6 +540,7 @@ def chat_endpoint(request: Request, req: ChatRequest, username: str = Depends(ge
                 out_ans = out_ans.replace(placeholder, orig_val)
                 out_ans = out_ans.replace(placeholder.rstrip("0123456789_"), orig_val)
             yield out_ans
+
         return EventSourceResponse(cache_stream())
 
     CACHE_COUNTER.labels(result="miss").inc()
@@ -477,7 +585,7 @@ def chat_endpoint(request: Request, req: ChatRequest, username: str = Depends(ge
             window_size=req.window_size,
             metadata_filter=metadata_filter,
             user_id=username,
-            parent_retrieval=req.parent_retrieval
+            parent_retrieval=req.parent_retrieval,
         )
 
         # Step-Back Prompting
@@ -485,13 +593,15 @@ def chat_endpoint(request: Request, req: ChatRequest, username: str = Depends(ge
             stepback_query = generate_stepback_query(rewritten_query, llm)
             if stepback_query != rewritten_query:
                 stepback_candidates = retrieve_context(
-                    stepback_query, client, embedder,
+                    stepback_query,
+                    client,
+                    embedder,
                     top_k=max(2, req.top_k),
                     vector_weight=req.vector_weight,
                     window_size=req.window_size,
                     metadata_filter=None,
                     user_id=username,
-                    parent_retrieval=req.parent_retrieval
+                    parent_retrieval=req.parent_retrieval,
                 )
                 existing_contents = {c.get("content", "") for c in candidates}
                 for c in stepback_candidates:
@@ -502,13 +612,15 @@ def chat_endpoint(request: Request, req: ChatRequest, username: str = Depends(ge
         if detect_multi_hop_query(rewritten_query, llm):
             logger.info("[MULTI-HOP] Detected multi-hop query — running second retrieval pass.")
             second_pass = retrieve_context(
-                rewritten_query, client, embedder,
+                rewritten_query,
+                client,
+                embedder,
                 top_k=max(2, req.top_k),
                 vector_weight=req.vector_weight,
                 window_size=req.window_size,
                 metadata_filter=None,
                 user_id=username,
-                parent_retrieval=req.parent_retrieval
+                parent_retrieval=req.parent_retrieval,
             )
             existing_titles = {c.get("title", "") for c in candidates}
             for c in second_pass:
@@ -518,7 +630,9 @@ def chat_endpoint(request: Request, req: ChatRequest, username: str = Depends(ge
         # CRAG: fallback to web search if local similarity is too low
         max_score = max([c.get("similarity", 0.0) for c in candidates]) if candidates else 0.0
         if max_score < 0.30:
-            logger.info(f"[CRAG] RAG similarity too low ({max_score:.2f}) — triggering web search fallback.")
+            logger.info(
+                f"[CRAG] RAG similarity too low ({max_score:.2f}) — triggering web search fallback."
+            )
             web_sources = run_web_search(rewritten_query, max_results=3)
             if web_sources:
                 candidates = web_sources
@@ -526,8 +640,10 @@ def chat_endpoint(request: Request, req: ChatRequest, username: str = Depends(ge
 
         # Contextual Reranking
         reranker = get_reranker_lazy()
-        candidates = rerank_documents(rewritten_query, candidates, reranker, llm, top_k=req.rerank_pool)
-        sources = candidates[:req.top_k]
+        candidates = rerank_documents(
+            rewritten_query, candidates, reranker, llm, top_k=req.rerank_pool
+        )
+        sources = candidates[: req.top_k]
 
     elif intent == "general":
         # General knowledge: skip heavy RAG pipeline, go straight to CRAG web search
@@ -537,7 +653,9 @@ def chat_endpoint(request: Request, req: ChatRequest, username: str = Depends(ge
             sources = web_sources
             crag_active = True
 
-    raw_context = "\n\n".join([f"Source: {src['title']} (Page {src.get('page', 1)})\n{src['content']}" for src in sources])
+    raw_context = "\n\n".join(
+        [f"Source: {src['title']} (Page {src.get('page', 1)})\n{src['content']}" for src in sources]
+    )
     context = truncate_context(raw_context, max_tokens=6000)
 
     # Restore PII in the prompt so the LLM sees real values (only logs/traces see redacted form)
@@ -549,7 +667,7 @@ def chat_endpoint(request: Request, req: ChatRequest, username: str = Depends(ge
         prompt_content = f"""
         {sys_prompt}
         Use the following retrieved context to answer the question:
-        
+
         Question: {prompt_query}
         Context:
         {context}
@@ -564,12 +682,18 @@ def chat_endpoint(request: Request, req: ChatRequest, username: str = Depends(ge
     def sse_event_stream():
         with LATENCY_HISTOGRAM.time():
             full_response = ""
-            route_tag = "Corrective Web Search" if crag_active else ("RAG Retrieval" if intent == "rag" and context else f"Direct Chat ({intent})")
-            meta_json = json.dumps({
-                "routing": route_tag,
-                "filter": metadata_filter if metadata_filter else "None",
-                "sources": sources if sources else []
-            })
+            route_tag = (
+                "Corrective Web Search"
+                if crag_active
+                else ("RAG Retrieval" if intent == "rag" and context else f"Direct Chat ({intent})")
+            )
+            meta_json = json.dumps(
+                {
+                    "routing": route_tag,
+                    "filter": metadata_filter if metadata_filter else "None",
+                    "sources": sources if sources else [],
+                }
+            )
             yield f"__METADATA_START__{meta_json}__METADATA_END__"
 
             response_generator = llm.stream(prompt_content)
@@ -577,7 +701,9 @@ def chat_endpoint(request: Request, req: ChatRequest, username: str = Depends(ge
             # Sliding buffer for safe cross-chunk PII de-anonymization
             # Holds partial output until we are sure no placeholder spans the chunk boundary
             stream_buffer = ""
-            placeholder_max_len = max((len(p) for p in pii_mapping), default=0) if pii_mapping else 0
+            placeholder_max_len = (
+                max((len(p) for p in pii_mapping), default=0) if pii_mapping else 0
+            )
 
             for chunk in response_generator:
                 text_chunk = chunk.content
@@ -613,19 +739,31 @@ def chat_endpoint(request: Request, req: ChatRequest, username: str = Depends(ge
             if intent in ["rag", "general"] and context:
                 try:
                     faithfulness = with_retry(evaluate_faithfulness, context, full_response, llm)
-                    relevance = with_retry(evaluate_answer_relevance, redacted_query, full_response, llm)
-                    precision = with_retry(evaluate_context_precision, rewritten_query, context, llm)
-                    eval_data = {"faithfulness": faithfulness, "relevance": relevance, "precision": precision}
+                    relevance = with_retry(
+                        evaluate_answer_relevance, redacted_query, full_response, llm
+                    )
+                    precision = with_retry(
+                        evaluate_context_precision, rewritten_query, context, llm
+                    )
+                    eval_data = {
+                        "faithfulness": faithfulness,
+                        "relevance": relevance,
+                        "precision": precision,
+                    }
 
                     yield f"__EVAL_START__{json.dumps(eval_data)}__EVAL_END__"
 
                     session_id = str(uuid.uuid4().hex[:12])
                     conn = sqlite3.connect(USER_DB_PATH)
                     cursor = conn.cursor()
-                    cursor.execute("INSERT INTO chat_history (username, session_id, role, content) VALUES (?, ?, ?, ?)",
-                                   (username, session_id, "user", req.query))
-                    cursor.execute("INSERT INTO chat_history (username, session_id, role, content) VALUES (?, ?, ?, ?)",
-                                   (username, session_id, "assistant", full_response))
+                    cursor.execute(
+                        "INSERT INTO chat_history (username, session_id, role, content) VALUES (?, ?, ?, ?)",
+                        (username, session_id, "user", req.query),
+                    )
+                    cursor.execute(
+                        "INSERT INTO chat_history (username, session_id, role, content) VALUES (?, ?, ?, ?)",
+                        (username, session_id, "assistant", full_response),
+                    )
                     conn.commit()
                     conn.close()
 
@@ -639,16 +777,22 @@ def chat_endpoint(request: Request, req: ChatRequest, username: str = Depends(ge
                         cur_tok = conn_tok.cursor()
                         cur_tok.execute(
                             "INSERT INTO token_usage (username, query, prompt_tokens, completion_tokens, total_tokens) VALUES (?, ?, ?, ?, ?)",
-                            (username, req.query, prompt_tokens, completion_tokens, total_tokens)
+                            (username, req.query, prompt_tokens, completion_tokens, total_tokens),
                         )
                         conn_tok.commit()
                         conn_tok.close()
                     except Exception:
                         pass
 
-                    if "cannot find the answer" not in full_response.lower() and "[warning]" not in full_response.lower() and len(full_response.strip()) > 0:
+                    if (
+                        "cannot find the answer" not in full_response.lower()
+                        and "[warning]" not in full_response.lower()
+                        and len(full_response.strip()) > 0
+                    ):
                         source_filenames = list(set([src["title"] for src in sources]))
-                        save_to_semantic_cache(client, redacted_query, full_response, source_filenames, embedder)
+                        save_to_semantic_cache(
+                            client, redacted_query, full_response, source_filenames, embedder
+                        )
                 except Exception as e:
                     logger.error(f"[ROUTING] Evaluation or caching error: {e}")
 

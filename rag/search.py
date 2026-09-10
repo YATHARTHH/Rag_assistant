@@ -11,7 +11,16 @@ from security.encryption import decrypt_text
 
 logger = logging.getLogger("rag_api")
 
-def search_qdrant(client: QdrantClient, collection_name: str, query: str, embedder, username: str, top_k=5, title_filter=None) -> list[dict]:
+
+def search_qdrant(
+    client: QdrantClient,
+    collection_name: str,
+    query: str,
+    embedder,
+    username: str,
+    top_k=5,
+    title_filter=None,
+) -> list[dict]:
     """
     Performs vector search in Qdrant with tenant isolation and optional title filtering.
     """
@@ -23,7 +32,7 @@ def search_qdrant(client: QdrantClient, collection_name: str, query: str, embedd
         models.Filter(
             should=[
                 models.FieldCondition(key="user_id", match=models.MatchValue(value=username)),
-                models.FieldCondition(key="user_id", match=models.MatchValue(value="public"))
+                models.FieldCondition(key="user_id", match=models.MatchValue(value="public")),
             ]
         )
     ]
@@ -38,7 +47,7 @@ def search_qdrant(client: QdrantClient, collection_name: str, query: str, embedd
         query=query_vector,
         query_filter=query_filter,
         limit=top_k * 2,
-        with_payload=True
+        with_payload=True,
     )
 
     processed_results = []
@@ -53,16 +62,19 @@ def search_qdrant(client: QdrantClient, collection_name: str, query: str, embedd
             dec_parent = payload.get("parent_text", payload["content"])
             dec_overlap = payload.get("overlap_text", payload["content"])
 
-        processed_results.append({
-            "content": dec_content,
-            "parent_text": dec_parent,
-            "overlap_text": dec_overlap,
-            "title": payload["title"],
-            "sent_index": payload["sent_index"],
-            "user_id": payload["user_id"],
-            "score": r.score
-        })
+        processed_results.append(
+            {
+                "content": dec_content,
+                "parent_text": dec_parent,
+                "overlap_text": dec_overlap,
+                "title": payload["title"],
+                "sent_index": payload["sent_index"],
+                "user_id": payload["user_id"],
+                "score": r.score,
+            }
+        )
     return processed_results
+
 
 def run_bm25_on_candidates(query: str, candidates: list[dict], top_k=5) -> list[dict]:
     """
@@ -81,7 +93,10 @@ def run_bm25_on_candidates(query: str, candidates: list[dict], top_k=5) -> list[
     scored_candidates.sort(key=lambda x: x[0], reverse=True)
     return [item[1] for item in scored_candidates][:top_k]
 
-def reciprocal_rank_fusion(vector_results: list[dict], bm25_results: list[dict], k=60) -> list[dict]:
+
+def reciprocal_rank_fusion(
+    vector_results: list[dict], bm25_results: list[dict], k=60
+) -> list[dict]:
     """
     Merges dense and sparse candidates using RRF.
     """
@@ -101,7 +116,10 @@ def reciprocal_rank_fusion(vector_results: list[dict], bm25_results: list[dict],
     sorted_docs = sorted(scores.values(), key=lambda x: x["score"], reverse=True)
     return [item["doc"] for item in sorted_docs]
 
-def maximal_marginal_relevance(query: str, candidates: list[dict], embedder, lambda_mult=0.5, top_k=3) -> list[dict]:
+
+def maximal_marginal_relevance(
+    query: str, candidates: list[dict], embedder, lambda_mult=0.5, top_k=3
+) -> list[dict]:
     """
     Diversifies RAG context using MMR.
     """
@@ -116,9 +134,9 @@ def maximal_marginal_relevance(query: str, candidates: list[dict], embedder, lam
     unselected_indices = list(range(len(candidates)))
 
     def cos_sim(v1, v2):
-        dot = sum(a*b for a, b in zip(v1, v2))
-        norm1 = math.sqrt(sum(a*a for a in v1))
-        norm2 = math.sqrt(sum(b*b for b in v2))
+        dot = sum(a * b for a, b in zip(v1, v2, strict=False))
+        norm1 = math.sqrt(sum(a * a for a in v1))
+        norm2 = math.sqrt(sum(b * b for b in v2))
         if norm1 * norm2 == 0:
             return 0.0
         return dot / (norm1 * norm2)
@@ -131,7 +149,9 @@ def maximal_marginal_relevance(query: str, candidates: list[dict], embedder, lam
         best_idx = None
         for idx in unselected_indices:
             sim_query = cos_sim(embeddings[idx], query_vector)
-            sim_selected = max(cos_sim(embeddings[idx], embeddings[s_idx]) for s_idx in selected_indices)
+            sim_selected = max(
+                cos_sim(embeddings[idx], embeddings[s_idx]) for s_idx in selected_indices
+            )
             mmr_score = lambda_mult * sim_query - (1 - lambda_mult) * sim_selected
             if mmr_score > best_mmr:
                 best_mmr = mmr_score
@@ -142,6 +162,7 @@ def maximal_marginal_relevance(query: str, candidates: list[dict], embedder, lam
         else:
             break
     return [candidates[idx] for idx in selected_indices]
+
 
 def compress_context_with_llm(query: str, chunks: list[dict], llm, top_k=3) -> list[dict]:
     """
@@ -156,7 +177,7 @@ def compress_context_with_llm(query: str, chunks: list[dict], llm, top_k=3) -> l
 
         Query: "{query}"
         Passage:
-        "{c['content']}"
+        "{c["content"]}"
 
         Extracted sentence(s):
         """
@@ -172,6 +193,7 @@ def compress_context_with_llm(query: str, chunks: list[dict], llm, top_k=3) -> l
         except Exception:
             compressed_chunks.append(c)
     return compressed_chunks[:top_k]
+
 
 def lost_in_the_middle_reorder(sources: list[dict]) -> list[dict]:
     """
@@ -194,13 +216,30 @@ def lost_in_the_middle_reorder(sources: list[dict]) -> list[dict]:
             right -= 1
     return reordered
 
-def retrieve_context(query: str, client: QdrantClient, embedder, top_k=3, vector_weight=0.5, window_size=2, metadata_filter=None, user_id=None, parent_retrieval=False) -> list[dict]:
+
+def retrieve_context(
+    query: str,
+    client: QdrantClient,
+    embedder,
+    top_k=3,
+    vector_weight=0.5,
+    window_size=2,
+    metadata_filter=None,
+    user_id=None,
+    parent_retrieval=False,
+) -> list[dict]:
     """
     Consolidated RAG retrieval using hybrid search, RRF, MMR, and Lost-in-the-Middle reordering.
     """
     # 1. Fetch dense vector results
     vector_candidates = search_qdrant(
-        client, "research_papers", query, embedder, username=user_id, top_k=top_k * 4, title_filter=metadata_filter
+        client,
+        "research_papers",
+        query,
+        embedder,
+        username=user_id,
+        top_k=top_k * 4,
+        title_filter=metadata_filter,
     )
 
     # 2. Fetch all matching documents for BM25 candidates
@@ -210,18 +249,20 @@ def retrieve_context(query: str, client: QdrantClient, embedder, top_k=3, vector
             models.Filter(
                 should=[
                     models.FieldCondition(key="user_id", match=models.MatchValue(value=user_id)),
-                    models.FieldCondition(key="user_id", match=models.MatchValue(value="public"))
+                    models.FieldCondition(key="user_id", match=models.MatchValue(value="public")),
                 ]
             )
         ]
         if metadata_filter:
-            must_cond.append(models.FieldCondition(key="title", match=models.MatchValue(value=metadata_filter)))
+            must_cond.append(
+                models.FieldCondition(key="title", match=models.MatchValue(value=metadata_filter))
+            )
 
         scroll_res = client.scroll(
             collection_name="research_papers",
             scroll_filter=models.Filter(must=must_cond),
             limit=5000,
-            with_payload=True
+            with_payload=True,
         )
         if scroll_res and scroll_res[0]:
             for item in scroll_res[0]:
@@ -234,14 +275,16 @@ def retrieve_context(query: str, client: QdrantClient, embedder, top_k=3, vector
                     dec_content = payload["content"]
                     dec_parent = payload.get("parent_text", payload["content"])
                     dec_overlap = payload.get("overlap_text", payload["content"])
-                all_chunks.append({
-                    "content": dec_content,
-                    "parent_text": dec_parent,
-                    "overlap_text": dec_overlap,
-                    "title": payload["title"],
-                    "sent_index": payload["sent_index"],
-                    "user_id": payload["user_id"]
-                })
+                all_chunks.append(
+                    {
+                        "content": dec_content,
+                        "parent_text": dec_parent,
+                        "overlap_text": dec_overlap,
+                        "title": payload["title"],
+                        "sent_index": payload["sent_index"],
+                        "user_id": payload["user_id"],
+                    }
+                )
     except Exception as e:
         logger.warning(f"[SEARCH] Scroll candidates error: {e}")
 
@@ -252,36 +295,39 @@ def retrieve_context(query: str, client: QdrantClient, embedder, top_k=3, vector
     rrf_candidates = reciprocal_rank_fusion(vector_candidates, bm25_candidates, k=60)
 
     # 5. MMR diversification
-    mmr_candidates = maximal_marginal_relevance(query, rrf_candidates, embedder, lambda_mult=0.5, top_k=top_k * 2)
+    mmr_candidates = maximal_marginal_relevance(
+        query, rrf_candidates, embedder, lambda_mult=0.5, top_k=top_k * 2
+    )
 
     # Format candidates
     sources = []
     for c in mmr_candidates:
         retrieved_text = c["parent_text"] if parent_retrieval else c["content"]
         score = c.get("score", 0.5)
-        sources.append({
-            "title": c["title"],
-            "content": retrieved_text,
-            "similarity": score,
-            "page": c.get("sent_index", 0) // 5 + 1
-        })
+        sources.append(
+            {
+                "title": c["title"],
+                "content": retrieved_text,
+                "similarity": score,
+                "page": c.get("sent_index", 0) // 5 + 1,
+            }
+        )
 
     # Apply Lost-in-the-Middle reordering to retrieved sources
     reordered_sources = lost_in_the_middle_reorder(sources[:top_k])
     return reordered_sources
 
+
 # -------------------------
 # Semantic Query Caching Methods
 # -------------------------
-def check_semantic_cache(client: QdrantClient, query: str, embedder, score_threshold=0.90, ttl_days=7) -> tuple:
+def check_semantic_cache(
+    client: QdrantClient, query: str, embedder, score_threshold=0.90, ttl_days=7
+) -> tuple:
     cached_embedder = CachedHuggingFaceEmbeddings(embedder)
     query_vector = cached_embedder.embed_query(query)
     try:
-        res = client.query_points(
-            collection_name="query_cache",
-            query=query_vector,
-            limit=1
-        )
+        res = client.query_points(collection_name="query_cache", query=query_vector, limit=1)
         if res.points:
             pt = res.points[0]
             similarity = pt.score
@@ -296,34 +342,36 @@ def check_semantic_cache(client: QdrantClient, query: str, embedder, score_thres
         logger.warning(f"[CACHE] Check error: {e}")
     return None, 0.0
 
-def save_to_semantic_cache(client: QdrantClient, query: str, response: str, source_files: list[str], embedder):
+
+def save_to_semantic_cache(
+    client: QdrantClient, query: str, response: str, source_files: list[str], embedder
+):
     cached_embedder = CachedHuggingFaceEmbeddings(embedder)
     vector = cached_embedder.embed_query(query)
     point_id = str(uuid.uuid5(uuid.NAMESPACE_DNS, f"cache_{query}"))
     try:
         client.upsert(
             collection_name="query_cache",
-            points=[models.PointStruct(
-                id=point_id,
-                vector=vector,
-                payload={
-                    "query": query,
-                    "response": response,
-                    "source_files": ",".join(source_files),
-                    "timestamp": time.time()
-                }
-            )]
+            points=[
+                models.PointStruct(
+                    id=point_id,
+                    vector=vector,
+                    payload={
+                        "query": query,
+                        "response": response,
+                        "source_files": ",".join(source_files),
+                        "timestamp": time.time(),
+                    },
+                )
+            ],
         )
     except Exception as e:
         logger.warning(f"[CACHE] Save error: {e}")
 
+
 def invalidate_semantic_cache_by_file(client: QdrantClient, filename: str):
     try:
-        results = client.scroll(
-            collection_name="query_cache",
-            limit=1000,
-            with_payload=True
-        )
+        results = client.scroll(collection_name="query_cache", limit=1000, with_payload=True)
         if results and results[0]:
             points_to_delete = []
             for item in results[0]:
@@ -335,6 +383,7 @@ def invalidate_semantic_cache_by_file(client: QdrantClient, filename: str):
     except Exception as e:
         logger.warning(f"[CACHE] Invalidation failed: {e}")
 
+
 def generate_metadata_filter(query: str, llm, unique_files: list[str]) -> str | None:
     """
     Analyzes the query and checks if the user is asking about a specific document from a list of unique file names.
@@ -344,7 +393,7 @@ def generate_metadata_filter(query: str, llm, unique_files: list[str]) -> str | 
 
     files_list_str = ", ".join([f"'{f}'" for f in unique_files])
     prompt = f"""
-    You are a database helper. 
+    You are a database helper.
     Analyze the user's query and decide if they are asking about a specific document or file from this list: [{files_list_str}].
 
     User Query: "{query}"
@@ -363,14 +412,29 @@ def generate_metadata_filter(query: str, llm, unique_files: list[str]) -> str | 
         logger.warning(f"[SEARCH] Error generating metadata filter: {e}")
     return None
 
+
 def spell_correct_query(query: str) -> str:
     """
     Corrects spelling errors in the query using pyspellchecker before retrieval.
     """
     try:
         from spellchecker import SpellChecker
+
         spell = SpellChecker()
-        domain_terms = ['rrf', 'hyde', 'smote', 'adasyn', 'mcc', 'auc-roc', 'auc-pr', 'g-mean', 'bleu', 'rouge', 'f1', 'f1-score']
+        domain_terms = [
+            "rrf",
+            "hyde",
+            "smote",
+            "adasyn",
+            "mcc",
+            "auc-roc",
+            "auc-pr",
+            "g-mean",
+            "bleu",
+            "rouge",
+            "f1",
+            "f1-score",
+        ]
         spell.word_frequency.load_words(domain_terms)
 
         words = query.split()
@@ -382,8 +446,8 @@ def spell_correct_query(query: str) -> str:
             else:
                 corr = spell.correction(stripped)
                 if corr:
-                    left_punc = w[:len(w) - len(w.lstrip(".,?!;:()\"'"))]
-                    right_punc = w[len(w.rstrip(".,?!;:()\"'")):]
+                    left_punc = w[: len(w) - len(w.lstrip(".,?!;:()\"'"))]
+                    right_punc = w[len(w.rstrip(".,?!;:()\"'")) :]
                     corrected.append(left_punc + corr + right_punc)
                 else:
                     corrected.append(w)
@@ -395,13 +459,14 @@ def spell_correct_query(query: str) -> str:
     except Exception:
         return query
 
+
 def generate_hyde_response(query: str, llm) -> str:
     """
     Generates a hypothetical answer paragraph using LLM (HyDE).
     """
     prompt = f"""
-    You are a helpful research assistant. 
-    Write a short hypothetical paragraph that directly answers the following question. 
+    You are a helpful research assistant.
+    Write a short hypothetical paragraph that directly answers the following question.
     Do not worry about being perfectly accurate; just write a plausible answer.
 
     Question: {query}
@@ -415,4 +480,3 @@ def generate_hyde_response(query: str, llm) -> str:
     except Exception as e:
         logger.warning(f"[SEARCH] HyDE response generation failed: {e}")
     return query
-

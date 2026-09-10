@@ -8,10 +8,11 @@ from rouge_score import rouge_scorer
 
 API_URL = "http://127.0.0.1:8000"
 
+
 def get_jwt_token():
     # Attempt to signup and login a test runner user
     username = "test_runner"
-    password = "SecurePassword123" # satisfies strength rules
+    password = "SecurePassword123"  # satisfies strength rules
 
     # Sign up
     requests.post(f"{API_URL}/auth/signup", json={"username": username, "password": password})
@@ -22,24 +23,28 @@ def get_jwt_token():
         return resp.json()["token"]
     raise RuntimeError("Failed to authenticate test runner.")
 
+
 def compute_bleu(reference: str, hypothesis: str) -> float:
     ref_tokens = reference.lower().split()
     hyp_tokens = hypothesis.lower().split()
     try:
         # Use sentence_bleu with smoothing to avoid 0.0 scores for short matches
         from nltk.translate.bleu_score import SmoothingFunction
+
         chencherry = SmoothingFunction()
         return sentence_bleu([ref_tokens], hyp_tokens, smoothing_function=chencherry.method1)
     except Exception:
         return 0.0
 
+
 def compute_rouge_l(reference: str, hypothesis: str) -> float:
     try:
-        scorer = rouge_scorer.RougeScorer(['rougeL'], use_stemmer=True)
+        scorer = rouge_scorer.RougeScorer(["rougeL"], use_stemmer=True)
         scores = scorer.score(reference, hypothesis)
-        return scores['rougeL'].fmeasure
+        return scores["rougeL"].fmeasure
     except Exception:
         return 0.0
+
 
 def run_regression_suite():
     dataset_path = "./tests/golden_dataset.json"
@@ -80,7 +85,7 @@ def run_regression_suite():
             "enable_reranking": False,
             "rerank_pool": 10,
             "prompt_style": "Strict Fact-Only",
-            "parent_retrieval": False
+            "parent_retrieval": False,
         }
 
         start_time = time.time()
@@ -118,18 +123,22 @@ def run_regression_suite():
             relevance = eval_scores.get("relevance", 0.0)
             precision = eval_scores.get("precision", 0.0)
 
-            results.append({
-                "query": query,
-                "latency": latency,
-                "bleu": bleu,
-                "rouge": rouge,
-                "faithfulness": faithfulness,
-                "relevance": relevance,
-                "precision": precision
-            })
+            results.append(
+                {
+                    "query": query,
+                    "latency": latency,
+                    "bleu": bleu,
+                    "rouge": rouge,
+                    "faithfulness": faithfulness,
+                    "relevance": relevance,
+                    "precision": precision,
+                }
+            )
 
             print(f"-> BLEU: {bleu:.2f} | ROUGE-L: {rouge:.2f}")
-            print(f"-> Faithfulness: {faithfulness:.2f} | Relevance: {relevance:.2f} | Context Precision: {precision:.2f}")
+            print(
+                f"-> Faithfulness: {faithfulness:.2f} | Relevance: {relevance:.2f} | Context Precision: {precision:.2f}"
+            )
         else:
             print(f"-> Request failed: {resp.status_code} - {resp.text}")
 
@@ -140,7 +149,10 @@ def run_regression_suite():
     print("-" * 90)
     for r in results:
         short_q = r["query"][:47] + "..." if len(r["query"]) > 50 else r["query"]
-        print(f"{short_q:<50} | {r['bleu']:<6.2f} | {r['rouge']:<8.2f} | {r['faithfulness']:<8.2f} | {r['relevance']:<9.2f}")
+        print(
+            f"{short_q:<50} | {r['bleu']:<6.2f} | {r['rouge']:<8.2f} | {r['faithfulness']:<8.2f} | {r['relevance']:<9.2f}"
+        )
+
 
 if __name__ == "__main__":
     run_regression_suite()
