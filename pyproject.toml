@@ -1,0 +1,86 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rag-ai-assistant"
+version = "1.0.0"
+description = "Enterprise-grade modular RAG API with hybrid retrieval and security guardrails"
+readme = "README.md"
+requires-python = ">=3.10"
+
+[tool.ruff]
+target-version = "py310"
+line-length = 100
+exclude = [
+    ".git",
+    "__pycache__",
+    "venv",
+    ".venv",
+    "build",
+    "dist"
+]
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "W",   # pycodestyle warnings
+    "F",   # Pyflakes
+    "I",   # isort
+    "B",   # flake8-bugbear
+    "UP"   # pyupgrade
+]
+ignore = [
+    "E501", # line length violations handled by ruff format
+    "B008"  # do not perform function calls in argument defaults (FastAPI Depends pattern)
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["api", "database", "rag", "security"]
+
+[tool.pytest.ini_options]
+minversion = "7.0"
+pythonpath = ["."]
+addopts = "-ra -q --cov=api --cov=security --cov=database --cov=rag --cov-report=term-missing --cov-report=xml"
+testpaths = [
+    "tests"
+]
+python_files = [
+    "test_*.py"
+]
+python_classes = [
+    "Test*"
+]
+python_functions = [
+    "test_*"
+]
+asyncio_mode = "auto"
+filterwarnings = [
+    "ignore::DeprecationWarning",
+    "ignore::UserWarning"
+]
+
+[tool.coverage.run]
+branch = true
+source = ["api", "security", "database", "rag"]
+omit = [
+    "tests/*",
+    "venv/*",
+    "__pycache__/*"
+]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "if __name__ == .__main__.:",
+    "raise NotImplementedError",
+    "if TYPE_CHECKING:"
+]
+
+[tool.mypy]
+python_version = "3.10"
+warn_return_any = true
+warn_unused_configs = true
+ignore_missing_imports = true
+exclude = ["venv", ".venv", "tests"]

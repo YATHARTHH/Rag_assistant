@@ -1,5 +1,5 @@
-import os
 import logging
+
 from qdrant_client import QdrantClient
 from qdrant_client.http import models
 
@@ -68,9 +68,10 @@ def add_chunks_to_qdrant(client: QdrantClient, chunks: list, username: str, embe
     Embeds, encrypts, and uploads document chunks to Qdrant collection.
     """
     import uuid
-    from security.encryption import encrypt_text
+
     from rag.embedding import CachedHuggingFaceEmbeddings
-    
+    from security.encryption import encrypt_text
+
     cached_embedder = CachedHuggingFaceEmbeddings(embedder)
     texts = [c["content"] for c in chunks]
     embeddings = cached_embedder.embed_documents(texts)

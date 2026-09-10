@@ -1,8 +1,8 @@
-import re
 import math
-from typing import List, Dict
+import re
 
-def cosine_similarity(v1: List[float], v2: List[float]) -> float:
+
+def cosine_similarity(v1: list[float], v2: list[float]) -> float:
     dot = sum(a*b for a, b in zip(v1, v2))
     norm1 = math.sqrt(sum(a*a for a in v1))
     norm2 = math.sqrt(sum(b*b for b in v2))
@@ -10,7 +10,7 @@ def cosine_similarity(v1: List[float], v2: List[float]) -> float:
         return 0.0
     return dot / (norm1 * norm2)
 
-def split_into_sentences(text: str) -> List[str]:
+def split_into_sentences(text: str) -> list[str]:
     """
     Splits text into clean individual sentences using regex lookbehinds.
     Protects numbered list digits and abbreviations.
@@ -27,7 +27,7 @@ def split_into_sentences(text: str) -> List[str]:
     sentences = sentence_boundary.split(text)
     return [s.strip() for s in sentences if s.strip()]
 
-def semantic_chunk_text(content: str, title: str, embedder, distance_threshold=0.5) -> List[Dict]:
+def semantic_chunk_text(content: str, title: str, embedder, distance_threshold=0.5) -> list[dict]:
     """
     Groups document content into semantic chunks based on sentence distance boundaries.
     Falls back to paragraph-based splitting if natural paragraph breaks exist.
@@ -47,21 +47,21 @@ def semantic_chunk_text(content: str, title: str, embedder, distance_threshold=0
     sentences = split_into_sentences(content)
     if len(sentences) <= 1:
         return [{"title": title, "content": s, "sent_index": idx} for idx, s in enumerate(sentences)]
-        
+
     # Generate embeddings for all sentences
     embeddings = embedder.embed_documents(sentences)
-    
+
     # Calculate cosine distances between adjacent sentences
     distances = []
     for i in range(len(embeddings) - 1):
         sim = cosine_similarity(embeddings[i], embeddings[i+1])
         distances.append(1.0 - sim)
-        
+
     # Custom semantic chunk clustering
     chunks = []
     current_chunk_sentences = [sentences[0]]
     chunk_index = 0
-    
+
     for i, dist in enumerate(distances):
         # If semantic gap exceeds threshold, start a new chunk
         if dist >= distance_threshold:
@@ -73,7 +73,7 @@ def semantic_chunk_text(content: str, title: str, embedder, distance_threshold=0
             current_chunk_sentences = []
             chunk_index += 1
         current_chunk_sentences.append(sentences[i + 1])
-        
+
     if current_chunk_sentences:
         chunks.append({
             "title": title,
@@ -82,7 +82,7 @@ def semantic_chunk_text(content: str, title: str, embedder, distance_threshold=0
         })
     return chunks
 
-def parent_child_chunking(content: str, filename: str, embedder) -> List[Dict]:
+def parent_child_chunking(content: str, filename: str, embedder) -> list[dict]:
     """
     Splits document content into semantic parents (paragraphs) and child chunks (sentences).
     """
@@ -105,7 +105,7 @@ def parent_child_chunking(content: str, filename: str, embedder) -> List[Dict]:
             })
     return chunks
 
-def chunk_document_text(content: str, title: str, chunk_size=None, chunk_overlap=None) -> List[Dict]:
+def chunk_document_text(content: str, title: str, chunk_size=None, chunk_overlap=None) -> list[dict]:
     """
     Backup chunker (used if semantic embeddings are skipped).
     """

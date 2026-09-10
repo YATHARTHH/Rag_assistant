@@ -1,9 +1,14 @@
 import os
-import sys
+
 import tasks
-from database.qdrant import get_qdrant_client, init_qdrant_collections, delete_file_from_qdrant, add_chunks_to_qdrant
-from rag.embedding import make_embedder
+from database.qdrant import (
+    add_chunks_to_qdrant,
+    delete_file_from_qdrant,
+    get_qdrant_client,
+    init_qdrant_collections,
+)
 from rag.chunking import parent_child_chunking
+from rag.embedding import make_embedder
 from rag.search import invalidate_semantic_cache_by_file
 
 print("Loading embedder...")

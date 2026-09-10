@@ -1,19 +1,19 @@
+import atexit
+import json
 import os
 import sys
-import json
-import logging
-import atexit
+
+from dotenv import load_dotenv
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
-from dotenv import load_dotenv
 
 # Load env variables
 load_dotenv()
 
 # Import local packages
-from api.middleware import limiter, request_logger_middleware, logger
+from api.middleware import limiter, logger, request_logger_middleware
 from api.routing import router
 
 # -------------------------

@@ -1,11 +1,12 @@
-import os
+import csv
 import io
+import json
+import os
 from datetime import datetime
+
+import docx
 from celery import Celery
 from unstructured.partition.auto import partition
-import docx
-import csv
-import json
 
 # Initialize Celery app
 celery_app = Celery(
@@ -89,27 +90,27 @@ def parse_file_content(file_path: str) -> str:
     Robust multi-format local document parser with fallback capabilities.
     """
     ext = os.path.splitext(file_path)[1].lower()
-    
+
     # 1. Word document parsing
     if ext == ".docx":
         doc = docx.Document(file_path)
         return "\n".join([p.text for p in doc.paragraphs])
-        
+
     # 2. CSV document parsing
     elif ext == ".csv":
         rows = []
-        with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+        with open(file_path, encoding="utf-8", errors="ignore") as f:
             reader = csv.reader(f)
             for row in reader:
                 rows.append(" | ".join(row))
         return "\n".join(rows)
-        
+
     # 3. JSON parsing
     elif ext == ".json":
-        with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+        with open(file_path, encoding="utf-8", errors="ignore") as f:
             data = json.load(f)
             return json.dumps(data, indent=2)
-            
+
     # 4. PDF Layout-aware extraction using Unstructured, fallback to PyMuPDF OCR
     elif ext == ".pdf":
         try:
@@ -119,13 +120,13 @@ def parse_file_content(file_path: str) -> str:
                 return text
         except Exception:
             pass
-            
+
         # Fallback to PyMuPDF + Tesseract OCR
         # Import lazily to avoid loading heavy modules unless PDF fallback is triggered
         import fitz
-        from PIL import Image
         import pytesseract
-        
+        from PIL import Image
+
         content = ""
         try:
             doc = fitz.open(file_path)
@@ -141,11 +142,11 @@ def parse_file_content(file_path: str) -> str:
                     content += text + "\n"
         except Exception as e:
             print(f"[OCR FALLBACK ERROR] {e}")
-            
+
         return content
-        
+
     # 5. Plain Text / Markdown
     else:
-        with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+        with open(file_path, encoding="utf-8", errors="ignore") as f:
             return f.read()
 

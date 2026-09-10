@@ -1,24 +1,23 @@
-import math
-import uuid
-import time
 import logging
-from typing import List, Dict, Optional
+import math
+import time
+import uuid
+
 from qdrant_client import QdrantClient
 from qdrant_client.http import models
 
-from database.qdrant import get_qdrant_client
-from security.encryption import decrypt_text, encrypt_text
 from rag.embedding import CachedHuggingFaceEmbeddings
+from security.encryption import decrypt_text
 
 logger = logging.getLogger("rag_api")
 
-def search_qdrant(client: QdrantClient, collection_name: str, query: str, embedder, username: str, top_k=5, title_filter=None) -> List[Dict]:
+def search_qdrant(client: QdrantClient, collection_name: str, query: str, embedder, username: str, top_k=5, title_filter=None) -> list[dict]:
     """
     Performs vector search in Qdrant with tenant isolation and optional title filtering.
     """
     cached_embedder = CachedHuggingFaceEmbeddings(embedder)
     query_vector = cached_embedder.embed_query(query)
-    
+
     # Audit: Enforce tenant isolation on user_id payload field
     must_conditions = [
         models.Filter(
@@ -32,7 +31,7 @@ def search_qdrant(client: QdrantClient, collection_name: str, query: str, embedd
         must_conditions.append(
             models.FieldCondition(key="title", match=models.MatchValue(value=title_filter))
         )
-        
+
     query_filter = models.Filter(must=must_conditions)
     res = client.query_points(
         collection_name=collection_name,
@@ -41,7 +40,7 @@ def search_qdrant(client: QdrantClient, collection_name: str, query: str, embedd
         limit=top_k * 2,
         with_payload=True
     )
-    
+
     processed_results = []
     for r in res.points:
         payload = r.payload
@@ -53,7 +52,7 @@ def search_qdrant(client: QdrantClient, collection_name: str, query: str, embedd
             dec_content = payload["content"]
             dec_parent = payload.get("parent_text", payload["content"])
             dec_overlap = payload.get("overlap_text", payload["content"])
-            
+
         processed_results.append({
             "content": dec_content,
             "parent_text": dec_parent,
@@ -65,7 +64,7 @@ def search_qdrant(client: QdrantClient, collection_name: str, query: str, embedd
         })
     return processed_results
 
-def run_bm25_on_candidates(query: str, candidates: List[Dict], top_k=5) -> List[Dict]:
+def run_bm25_on_candidates(query: str, candidates: list[dict], top_k=5) -> list[dict]:
     """
     Ranks candidates using BM25 query term matching on context.
     """
@@ -82,7 +81,7 @@ def run_bm25_on_candidates(query: str, candidates: List[Dict], top_k=5) -> List[
     scored_candidates.sort(key=lambda x: x[0], reverse=True)
     return [item[1] for item in scored_candidates][:top_k]
 
-def reciprocal_rank_fusion(vector_results: List[Dict], bm25_results: List[Dict], k=60) -> List[Dict]:
+def reciprocal_rank_fusion(vector_results: list[dict], bm25_results: list[dict], k=60) -> list[dict]:
     """
     Merges dense and sparse candidates using RRF.
     """
@@ -92,30 +91,30 @@ def reciprocal_rank_fusion(vector_results: List[Dict], bm25_results: List[Dict],
         if text not in scores:
             scores[text] = {"doc": doc, "score": 0.0}
         scores[text]["score"] += 1.0 / (k + rank + 1)
-        
+
     for rank, doc in enumerate(bm25_results):
         text = doc["content"]
         if text not in scores:
             scores[text] = {"doc": doc, "score": 0.0}
         scores[text]["score"] += 1.0 / (k + rank + 1)
-        
+
     sorted_docs = sorted(scores.values(), key=lambda x: x["score"], reverse=True)
     return [item["doc"] for item in sorted_docs]
 
-def maximal_marginal_relevance(query: str, candidates: List[Dict], embedder, lambda_mult=0.5, top_k=3) -> List[Dict]:
+def maximal_marginal_relevance(query: str, candidates: list[dict], embedder, lambda_mult=0.5, top_k=3) -> list[dict]:
     """
     Diversifies RAG context using MMR.
     """
     if not candidates or len(candidates) <= top_k:
         return candidates[:top_k]
-        
+
     cached_embedder = CachedHuggingFaceEmbeddings(embedder)
     query_vector = cached_embedder.embed_query(query)
     texts = [c["content"] for c in candidates]
     embeddings = cached_embedder.embed_documents(texts)
     selected_indices = []
     unselected_indices = list(range(len(candidates)))
-    
+
     def cos_sim(v1, v2):
         dot = sum(a*b for a, b in zip(v1, v2))
         norm1 = math.sqrt(sum(a*a for a in v1))
@@ -123,10 +122,10 @@ def maximal_marginal_relevance(query: str, candidates: List[Dict], embedder, lam
         if norm1 * norm2 == 0:
             return 0.0
         return dot / (norm1 * norm2)
-        
+
     first_idx = unselected_indices.pop(0)
     selected_indices.append(first_idx)
-    
+
     while len(selected_indices) < top_k and unselected_indices:
         best_mmr = -100.0
         best_idx = None
@@ -144,7 +143,7 @@ def maximal_marginal_relevance(query: str, candidates: List[Dict], embedder, lam
             break
     return [candidates[idx] for idx in selected_indices]
 
-def compress_context_with_llm(query: str, chunks: List[Dict], llm, top_k=3) -> List[Dict]:
+def compress_context_with_llm(query: str, chunks: list[dict], llm, top_k=3) -> list[dict]:
     """
     Contextual LLM chunk summarizer to trim irrelevant sentences.
     """
@@ -174,18 +173,18 @@ def compress_context_with_llm(query: str, chunks: List[Dict], llm, top_k=3) -> L
             compressed_chunks.append(c)
     return compressed_chunks[:top_k]
 
-def lost_in_the_middle_reorder(sources: List[Dict]) -> List[Dict]:
+def lost_in_the_middle_reorder(sources: list[dict]) -> list[dict]:
     """
     Re-orders sources so high-scoring ones sit at the beginning/end to combat LLM forgetfulness.
     """
     if len(sources) <= 2:
         return sources
-        
+
     sorted_sources = sorted(sources, key=lambda x: x.get("similarity", 0.5), reverse=True)
     reordered = [None] * len(sorted_sources)
     left = 0
     right = len(sorted_sources) - 1
-    
+
     for i, item in enumerate(sorted_sources):
         if i % 2 == 0:
             reordered[left] = item
@@ -195,7 +194,7 @@ def lost_in_the_middle_reorder(sources: List[Dict]) -> List[Dict]:
             right -= 1
     return reordered
 
-def retrieve_context(query: str, client: QdrantClient, embedder, top_k=3, vector_weight=0.5, window_size=2, metadata_filter=None, user_id=None, parent_retrieval=False) -> List[Dict]:
+def retrieve_context(query: str, client: QdrantClient, embedder, top_k=3, vector_weight=0.5, window_size=2, metadata_filter=None, user_id=None, parent_retrieval=False) -> list[dict]:
     """
     Consolidated RAG retrieval using hybrid search, RRF, MMR, and Lost-in-the-Middle reordering.
     """
@@ -203,7 +202,7 @@ def retrieve_context(query: str, client: QdrantClient, embedder, top_k=3, vector
     vector_candidates = search_qdrant(
         client, "research_papers", query, embedder, username=user_id, top_k=top_k * 4, title_filter=metadata_filter
     )
-    
+
     # 2. Fetch all matching documents for BM25 candidates
     all_chunks = []
     try:
@@ -217,7 +216,7 @@ def retrieve_context(query: str, client: QdrantClient, embedder, top_k=3, vector
         ]
         if metadata_filter:
             must_cond.append(models.FieldCondition(key="title", match=models.MatchValue(value=metadata_filter)))
-            
+
         scroll_res = client.scroll(
             collection_name="research_papers",
             scroll_filter=models.Filter(must=must_cond),
@@ -245,16 +244,16 @@ def retrieve_context(query: str, client: QdrantClient, embedder, top_k=3, vector
                 })
     except Exception as e:
         logger.warning(f"[SEARCH] Scroll candidates error: {e}")
-        
+
     # 3. Perform sparse BM25
     bm25_candidates = run_bm25_on_candidates(query, all_chunks, top_k=top_k * 4)
-    
+
     # 4. RRF ranking merge
     rrf_candidates = reciprocal_rank_fusion(vector_candidates, bm25_candidates, k=60)
-    
+
     # 5. MMR diversification
     mmr_candidates = maximal_marginal_relevance(query, rrf_candidates, embedder, lambda_mult=0.5, top_k=top_k * 2)
-    
+
     # Format candidates
     sources = []
     for c in mmr_candidates:
@@ -266,7 +265,7 @@ def retrieve_context(query: str, client: QdrantClient, embedder, top_k=3, vector
             "similarity": score,
             "page": c.get("sent_index", 0) // 5 + 1
         })
-        
+
     # Apply Lost-in-the-Middle reordering to retrieved sources
     reordered_sources = lost_in_the_middle_reorder(sources[:top_k])
     return reordered_sources
@@ -297,7 +296,7 @@ def check_semantic_cache(client: QdrantClient, query: str, embedder, score_thres
         logger.warning(f"[CACHE] Check error: {e}")
     return None, 0.0
 
-def save_to_semantic_cache(client: QdrantClient, query: str, response: str, source_files: List[str], embedder):
+def save_to_semantic_cache(client: QdrantClient, query: str, response: str, source_files: list[str], embedder):
     cached_embedder = CachedHuggingFaceEmbeddings(embedder)
     vector = cached_embedder.embed_query(query)
     point_id = str(uuid.uuid5(uuid.NAMESPACE_DNS, f"cache_{query}"))
@@ -336,13 +335,13 @@ def invalidate_semantic_cache_by_file(client: QdrantClient, filename: str):
     except Exception as e:
         logger.warning(f"[CACHE] Invalidation failed: {e}")
 
-def generate_metadata_filter(query: str, llm, unique_files: List[str]) -> Optional[str]:
+def generate_metadata_filter(query: str, llm, unique_files: list[str]) -> str | None:
     """
     Analyzes the query and checks if the user is asking about a specific document from a list of unique file names.
     """
     if not unique_files:
         return None
-        
+
     files_list_str = ", ".join([f"'{f}'" for f in unique_files])
     prompt = f"""
     You are a database helper. 
@@ -373,7 +372,7 @@ def spell_correct_query(query: str) -> str:
         spell = SpellChecker()
         domain_terms = ['rrf', 'hyde', 'smote', 'adasyn', 'mcc', 'auc-roc', 'auc-pr', 'g-mean', 'bleu', 'rouge', 'f1', 'f1-score']
         spell.word_frequency.load_words(domain_terms)
-        
+
         words = query.split()
         corrected = []
         for w in words:
@@ -388,7 +387,7 @@ def spell_correct_query(query: str) -> str:
                     corrected.append(left_punc + corr + right_punc)
                 else:
                     corrected.append(w)
-                    
+
         corrected_query = " ".join(corrected)
         if corrected_query.lower() != query.lower():
             logger.info(f"[SPELL CORRECT] '{query}' -> '{corrected_query}'")

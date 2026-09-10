@@ -1,6 +1,7 @@
-import os
 import base64
 import hashlib
+import os
+
 from cryptography.fernet import Fernet
 
 FERNET_KEY = os.getenv("FERNET_KEY")

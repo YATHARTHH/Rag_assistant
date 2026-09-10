@@ -1,5 +1,6 @@
-import re
 import logging
+import re
+
 from sentence_transformers import CrossEncoder
 
 logger = logging.getLogger("rag_api")
@@ -20,7 +21,7 @@ def llm_rerank_fallback(query: str, sources: list, llm, top_k=3) -> list:
     """
     if not sources or not llm:
         return sources[:top_k]
-    
+
     scored_sources = []
     for src in sources:
         prompt = f"""
@@ -45,7 +46,7 @@ def llm_rerank_fallback(query: str, sources: list, llm, top_k=3) -> list:
             new_src = dict(src)
             new_src["rerank_score"] = 1.0
             scored_sources.append(new_src)
-            
+
     scored_sources.sort(key=lambda x: x.get("rerank_score", 1.0), reverse=True)
     return scored_sources[:top_k]
 
@@ -56,7 +57,7 @@ def rerank_documents(query: str, sources: list, reranker, llm=None, top_k=3) -> 
     """
     if not sources:
         return []
-        
+
     if reranker:
         try:
             pairs = [[query, src["content"]] for src in sources]
@@ -67,8 +68,8 @@ def rerank_documents(query: str, sources: list, reranker, llm=None, top_k=3) -> 
             return sources[:top_k]
         except Exception as e:
             logger.warning(f"[RERANKER] Local reranking failed, attempting LLM fallback: {e}")
-            
+
     if llm:
         return llm_rerank_fallback(query, sources, llm, top_k=top_k)
-        
+
     return sources[:top_k]

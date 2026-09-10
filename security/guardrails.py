@@ -33,5 +33,5 @@ def check_safety_guardrails(text: str, llm, stage="input") -> bool:
             return verdict == "safe"
     except Exception as e:
         logger.warning(f"[SAFETY] Error checking guardrails: {e}")
-        
+
     return True  # Fallback to safe on error

@@ -1,7 +1,7 @@
 import os
 from datetime import datetime, timedelta
-from typing import Optional
-from fastapi import Depends, HTTPException, Header
+
+from fastapi import Depends, Header, HTTPException
 from fastapi.security import OAuth2PasswordBearer
 from jose import JWTError, jwt
 
@@ -17,7 +17,7 @@ def create_access_token(data: dict) -> str:
     to_encode.update({"exp": expire})
     return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
 
-def get_current_user(token: str = Depends(oauth2_scheme), x_api_key: Optional[str] = Header(None)) -> str:
+def get_current_user(token: str = Depends(oauth2_scheme), x_api_key: str | None = Header(None)) -> str:
     """
     Validates user credentials from either bearer token or programmatic API key header.
     """
@@ -25,10 +25,10 @@ def get_current_user(token: str = Depends(oauth2_scheme), x_api_key: Optional[st
         if x_api_key == os.getenv("RAG_API_KEY", "rag_developer_key_123"):
             return "api_key_admin"
         raise HTTPException(status_code=401, detail="Invalid API Key.")
-        
+
     if not token:
         raise HTTPException(status_code=401, detail="Authentication credentials required.")
-        
+
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
         username: str = payload.get("username")

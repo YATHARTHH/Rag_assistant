@@ -1,8 +1,6 @@
-import os
-import sqlite3
 import hashlib
 import json
-from typing import List, Optional
+import sqlite3
 
 USER_DB_PATH = "./users.db"
 
@@ -109,7 +107,7 @@ def verify_user(username: str, password: str) -> bool:
         return True
     return False
 
-def check_embedding_cache(text: str) -> Optional[List[float]]:
+def check_embedding_cache(text: str) -> list[float] | None:
     text_hash = hashlib.sha256(text.encode("utf-8")).hexdigest()
     try:
         conn = sqlite3.connect(USER_DB_PATH)
@@ -123,7 +121,7 @@ def check_embedding_cache(text: str) -> Optional[List[float]]:
         pass
     return None
 
-def save_embedding_cache(text: str, vector: List[float]):
+def save_embedding_cache(text: str, vector: list[float]):
     text_hash = hashlib.sha256(text.encode("utf-8")).hexdigest()
     vector_json = json.dumps(vector)
     try:

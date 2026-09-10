@@ -1,36 +1,47 @@
-import os
-import sys
-import uuid
-import time
 import json
-import logging
+import os
 import sqlite3
-from typing import List, Dict, Optional
-from datetime import datetime, timedelta
+import time
+import uuid
 
-from fastapi import APIRouter, Depends, HTTPException, Header, Request, status, BackgroundTasks
-from fastapi.responses import Response, JSONResponse
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
+from fastapi.responses import Response
 from pydantic import BaseModel
-from sse_starlette.sse import EventSourceResponse
 from qdrant_client.http import models
+from sse_starlette.sse import EventSourceResponse
+
+from api.auth import create_access_token, get_current_user
+from api.middleware import CACHE_COUNTER, LATENCY_HISTOGRAM, TOKEN_COUNTER, limiter, logger
+from database.qdrant import add_chunks_to_qdrant, delete_file_from_qdrant, get_qdrant_client
 
 # Import local modules
 from database.sqlite import USER_DB_PATH, create_user, verify_user
-from database.qdrant import get_qdrant_client, delete_file_from_qdrant, add_chunks_to_qdrant
-from security.guardrails import check_safety_guardrails
-from security.pii_redactor import redact_pii
 from rag.chunking import parent_child_chunking
 from rag.embedding import make_embedder
-from rag.search import (
-    retrieve_context, check_semantic_cache, save_to_semantic_cache,
-    invalidate_semantic_cache_by_file, generate_metadata_filter,
-    spell_correct_query, generate_hyde_response, compress_context_with_llm
+from rag.evaluation import (
+    evaluate_answer_relevance,
+    evaluate_context_precision,
+    evaluate_faithfulness,
 )
-from rag.prompts import get_system_prompt, rewrite_query_with_history, generate_stepback_query, detect_multi_hop_query, classify_query_intent
-from rag.evaluation import evaluate_faithfulness, evaluate_answer_relevance, evaluate_context_precision
+from rag.prompts import (
+    classify_query_intent,
+    detect_multi_hop_query,
+    generate_stepback_query,
+    get_system_prompt,
+    rewrite_query_with_history,
+)
 from rag.reranking import make_reranker, rerank_documents
-from api.auth import get_current_user, create_access_token
-from api.middleware import limiter, LATENCY_HISTOGRAM, CACHE_COUNTER, TOKEN_COUNTER, logger
+from rag.search import (
+    check_semantic_cache,
+    generate_hyde_response,
+    generate_metadata_filter,
+    invalidate_semantic_cache_by_file,
+    retrieve_context,
+    save_to_semantic_cache,
+    spell_correct_query,
+)
+from security.guardrails import check_safety_guardrails
+from security.pii_redactor import redact_pii
 
 router = APIRouter()
 
@@ -50,7 +61,7 @@ def get_reranker_lazy():
 class SignupRequest(BaseModel):
     username: str
     password: str
-    role: Optional[str] = "readonly"
+    role: str | None = "readonly"
 
 class LoginRequest(BaseModel):
     username: str
@@ -62,7 +73,7 @@ class ChatMessage(BaseModel):
 
 class ChatRequest(BaseModel):
     query: str
-    history: List[ChatMessage]
+    history: list[ChatMessage]
     username: str
     model_name: str
     temperature: float
@@ -71,10 +82,10 @@ class ChatRequest(BaseModel):
     window_size: int
     enable_reranking: bool
     rerank_pool: int
-    prompt_style: Optional[str] = "Strict Fact-Only"
-    parent_retrieval: Optional[bool] = False
-    hyde: Optional[bool] = False
-    step_back: Optional[bool] = False
+    prompt_style: str | None = "Strict Fact-Only"
+    parent_retrieval: bool | None = False
+    hyde: bool | None = False
+    step_back: bool | None = False
 
 class IngestRequest(BaseModel):
     file_name: str
@@ -83,7 +94,7 @@ class IngestRequest(BaseModel):
 class FeedbackRequest(BaseModel):
     message_id: str
     rating: int
-    feedback_text: Optional[str] = None
+    feedback_text: str | None = None
 
 # Exponential Backoff Retry Helper
 def with_retry(func, *args, max_retries: int = 3, **kwargs):
@@ -119,13 +130,13 @@ def health_check():
     except Exception:
         status_data["sqlite"] = "unhealthy"
         status_data["status"] = "unhealthy"
-        
+
     try:
         client.get_collection("research_papers")
     except Exception:
         status_data["qdrant"] = "unhealthy"
         status_data["status"] = "unhealthy"
-        
+
     if status_data["status"] == "unhealthy":
         raise HTTPException(status_code=500, detail=status_data)
     return status_data
@@ -137,7 +148,7 @@ def auth_signup(req: SignupRequest):
     success = create_user(req.username, req.password, req.role or "readonly")
     if not success:
         raise HTTPException(
-            status_code=400, 
+            status_code=400,
             detail="Username already exists or password is too weak (must be at least 8 characters, containing uppercase and a digit)."
         )
     return {"message": "User registered successfully."}
@@ -147,14 +158,14 @@ def auth_login(req: LoginRequest):
     valid = verify_user(req.username, req.password)
     if not valid:
         raise HTTPException(status_code=401, detail="Invalid username or password.")
-    
+
     conn = sqlite3.connect(USER_DB_PATH)
     cursor = conn.cursor()
     cursor.execute("SELECT role FROM users WHERE username = ?", (req.username,))
     row = cursor.fetchone()
     conn.close()
     role = row[0] if row else "readonly"
-    
+
     token = create_access_token({"username": req.username, "role": role})
     return {"token": token, "username": req.username, "role": role}
 
@@ -164,25 +175,25 @@ def start_ingest(request: Request, req: IngestRequest, background_tasks: Backgro
     from tasks import ingest_file_task
     if len(req.file_bytes_hex) > 20 * 1024 * 1024:
         raise HTTPException(status_code=400, detail="File too large. Max size is 10MB.")
-        
+
     try:
         file_bytes = bytes.fromhex(req.file_bytes_hex)
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid file bytes hex format.")
-        
+
     temp_dir = "./temp_uploads"
     os.makedirs(temp_dir, exist_ok=True)
     temp_path = os.path.join(temp_dir, f"{uuid.uuid4().hex}_{req.file_name}")
     with open(temp_path, "wb") as f:
         f.write(file_bytes)
-        
+
     try:
         task = ingest_file_task.delay(temp_path, req.file_name, username)
         return {"task_id": task.id, "status": "queued"}
     except Exception as exc:
         logger.warning(f"[INGEST] Celery queue failed (Redis offline?), falling back to local background thread: {exc}")
         task_id = f"local_{uuid.uuid4().hex[:12]}"
-        
+
         def local_ingestion_worker():
             try:
                 res = ingest_file_task(temp_path, req.file_name, username)
@@ -190,7 +201,7 @@ def start_ingest(request: Request, req: IngestRequest, background_tasks: Backgro
                     content = res.get("content", "")
                     filename = res.get("filename", "")
                     doc_metadata = res.get("doc_metadata", {})
-                    
+
                     chunks = parent_child_chunking(content, filename, embedder)
                     if chunks:
                         delete_file_from_qdrant(client, filename, username)
@@ -199,7 +210,7 @@ def start_ingest(request: Request, req: IngestRequest, background_tasks: Backgro
                     logger.info(f"[INGEST] Local background ingestion completed for {filename}")
             except Exception as worker_err:
                 logger.error(f"[INGEST] Local background ingestion failed for {req.file_name}: {worker_err}")
-                
+
         background_tasks.add_task(local_ingestion_worker)
         return {"task_id": task_id, "status": "completed"}
 
@@ -207,11 +218,11 @@ def start_ingest(request: Request, req: IngestRequest, background_tasks: Backgro
 def check_ingest_status(task_id: str, username: str = Depends(get_current_user)):
     if task_id.startswith("local_"):
         return {"task_id": task_id, "status": "completed"}
-        
+
     from tasks import ingest_file_task
     task_res = ingest_file_task.AsyncResult(task_id)
     state = task_res.state
-    
+
     if state == "SUCCESS":
         if task_id not in INDEXED_TASKS:
             result = task_res.result
@@ -219,16 +230,16 @@ def check_ingest_status(task_id: str, username: str = Depends(get_current_user))
                 content = result.get("content", "")
                 filename = result.get("filename", "")
                 doc_metadata = result.get("doc_metadata", {})
-                
+
                 chunks = parent_child_chunking(content, filename, embedder)
                 if chunks:
                     delete_file_from_qdrant(client, filename, username)
                     add_chunks_to_qdrant(client, chunks, username, embedder, doc_metadata=doc_metadata)
                     invalidate_semantic_cache_by_file(client, filename)
-                
+
                 INDEXED_TASKS.add(task_id)
         return {"task_id": task_id, "status": "completed"}
-        
+
     status_map = {
         "PENDING": "processing",
         "STARTED": "processing",
@@ -259,7 +270,7 @@ def get_db_stats(username: str = Depends(get_current_user)):
         )
         if scroll_res and scroll_res[0]:
             unique_files = list(set(
-                item.payload.get("title", "Unknown") 
+                item.payload.get("title", "Unknown")
                 for item in scroll_res[0]
             ))
             return {"total_chunks": len(scroll_res[0]), "unique_files": unique_files}
@@ -350,7 +361,7 @@ def post_chat_feedback(req: FeedbackRequest, username: str = Depends(get_current
     try:
         conn = sqlite3.connect(USER_DB_PATH)
         cursor = conn.cursor()
-        cursor.execute("INSERT INTO feedback (username, message_id, rating, feedback_text) VALUES (?, ?, ?, ?)", 
+        cursor.execute("INSERT INTO feedback (username, message_id, rating, feedback_text) VALUES (?, ?, ?, ?)",
                        (username, req.message_id, req.rating, req.feedback_text))
         conn.commit()
         conn.close()
@@ -360,10 +371,10 @@ def post_chat_feedback(req: FeedbackRequest, username: str = Depends(get_current
 
 @router.get("/metrics", tags=["Observability"], summary="Exposes Prometheus metrics endpoint.")
 def get_metrics():
-    from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
+    from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
     return Response(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
-def run_web_search(query: str, max_results: int = 3) -> List[Dict]:
+def run_web_search(query: str, max_results: int = 3) -> list[dict]:
     """
     Fallback search using DuckDuckGo (ddgs) to retrieve real-time web context.
     """
@@ -391,10 +402,10 @@ def run_web_search(query: str, max_results: int = 3) -> List[Dict]:
 def chat_endpoint(request: Request, req: ChatRequest, username: str = Depends(get_current_user)):
     # 0. PII Redaction with mapping tracking
     redacted_query, pii_mapping = redact_pii(req.query, return_mapping=True)
-    
+
     # 1. Fetch Prompts Config
     sys_prompt = get_system_prompt(req.prompt_style or "Strict Fact-Only")
-    
+
     # 2. Input Safety Guardrail check
     GROQ_KEY = os.getenv("GROQ_API_KEY", "")
     from langchain_groq import ChatGroq
@@ -403,13 +414,13 @@ def chat_endpoint(request: Request, req: ChatRequest, username: str = Depends(ge
         groq_api_key=GROQ_KEY,
         model=req.model_name,
     )
-    
+
     is_safe_input = check_safety_guardrails(redacted_query, llm)
     if not is_safe_input:
         def err_stream():
             yield "Error: Input violates safety guardrail policy."
         return EventSourceResponse(err_stream())
-        
+
     # Check Semantic cache
     cached_ans, sim = check_semantic_cache(client, redacted_query, embedder, score_threshold=0.90)
     if cached_ans:
@@ -423,16 +434,16 @@ def chat_endpoint(request: Request, req: ChatRequest, username: str = Depends(ge
                 out_ans = out_ans.replace(placeholder.rstrip("0123456789_"), orig_val)
             yield out_ans
         return EventSourceResponse(cache_stream())
-        
+
     CACHE_COUNTER.labels(result="miss").inc()
-    
+
     # 3. Intent Routing
     intent = classify_query_intent(redacted_query, llm)
-    
+
     # Ingested files listing
     stats = get_db_stats(username)
     unique_files = stats.get("unique_files", [])
-    
+
     # Retrieve & Rerank Context
     sources = []
     metadata_filter = None
@@ -520,12 +531,12 @@ def chat_endpoint(request: Request, req: ChatRequest, username: str = Depends(ge
 
     elif intent == "general":
         # General knowledge: skip heavy RAG pipeline, go straight to CRAG web search
-        logger.info(f"[CRAG] General intent detected — triggering web search directly.")
+        logger.info("[CRAG] General intent detected — triggering web search directly.")
         web_sources = run_web_search(query_to_search, max_results=3)
         if web_sources:
             sources = web_sources
             crag_active = True
-        
+
     raw_context = "\n\n".join([f"Source: {src['title']} (Page {src.get('page', 1)})\n{src['content']}" for src in sources])
     context = truncate_context(raw_context, max_tokens=6000)
 
@@ -549,7 +560,7 @@ def chat_endpoint(request: Request, req: ChatRequest, username: str = Depends(ge
 
         Question: {prompt_query}
         """
-        
+
     def sse_event_stream():
         with LATENCY_HISTOGRAM.time():
             full_response = ""
@@ -560,23 +571,23 @@ def chat_endpoint(request: Request, req: ChatRequest, username: str = Depends(ge
                 "sources": sources if sources else []
             })
             yield f"__METADATA_START__{meta_json}__METADATA_END__"
-            
+
             response_generator = llm.stream(prompt_content)
-            
+
             # Sliding buffer for safe cross-chunk PII de-anonymization
             # Holds partial output until we are sure no placeholder spans the chunk boundary
             stream_buffer = ""
             placeholder_max_len = max((len(p) for p in pii_mapping), default=0) if pii_mapping else 0
-            
+
             for chunk in response_generator:
                 text_chunk = chunk.content
                 full_response += text_chunk
                 stream_buffer += text_chunk
-                
+
                 # Replace any complete placeholders in the buffer
                 for placeholder, orig_val in pii_mapping.items():
                     stream_buffer = stream_buffer.replace(placeholder, orig_val)
-                
+
                 # Emit everything except the last `placeholder_max_len` chars
                 # Those tail chars are held back in case the next chunk completes a placeholder
                 if placeholder_max_len > 0 and len(stream_buffer) > placeholder_max_len:
@@ -586,18 +597,18 @@ def chat_endpoint(request: Request, req: ChatRequest, username: str = Depends(ge
                 elif placeholder_max_len == 0:
                     yield stream_buffer
                     stream_buffer = ""
-            
+
             # Flush remaining buffer — apply final PII restoration pass on any tail
             for placeholder, orig_val in pii_mapping.items():
                 stream_buffer = stream_buffer.replace(placeholder, orig_val)
             if stream_buffer:
                 yield stream_buffer
-                
+
             is_safe_output = check_safety_guardrails(full_response, llm)
             if not is_safe_output:
                 yield "[WARNING] Output blocked by safety guardrail policy."
                 return
-                
+
             eval_data = {}
             if intent in ["rag", "general"] and context:
                 try:
@@ -605,15 +616,15 @@ def chat_endpoint(request: Request, req: ChatRequest, username: str = Depends(ge
                     relevance = with_retry(evaluate_answer_relevance, redacted_query, full_response, llm)
                     precision = with_retry(evaluate_context_precision, rewritten_query, context, llm)
                     eval_data = {"faithfulness": faithfulness, "relevance": relevance, "precision": precision}
-                    
+
                     yield f"__EVAL_START__{json.dumps(eval_data)}__EVAL_END__"
-                    
+
                     session_id = str(uuid.uuid4().hex[:12])
                     conn = sqlite3.connect(USER_DB_PATH)
                     cursor = conn.cursor()
-                    cursor.execute("INSERT INTO chat_history (username, session_id, role, content) VALUES (?, ?, ?, ?)", 
+                    cursor.execute("INSERT INTO chat_history (username, session_id, role, content) VALUES (?, ?, ?, ?)",
                                    (username, session_id, "user", req.query))
-                    cursor.execute("INSERT INTO chat_history (username, session_id, role, content) VALUES (?, ?, ?, ?)", 
+                    cursor.execute("INSERT INTO chat_history (username, session_id, role, content) VALUES (?, ?, ?, ?)",
                                    (username, session_id, "assistant", full_response))
                     conn.commit()
                     conn.close()
@@ -634,11 +645,11 @@ def chat_endpoint(request: Request, req: ChatRequest, username: str = Depends(ge
                         conn_tok.close()
                     except Exception:
                         pass
-                    
+
                     if "cannot find the answer" not in full_response.lower() and "[warning]" not in full_response.lower() and len(full_response.strip()) > 0:
                         source_filenames = list(set([src["title"] for src in sources]))
                         save_to_semantic_cache(client, redacted_query, full_response, source_filenames, embedder)
                 except Exception as e:
                     logger.error(f"[ROUTING] Evaluation or caching error: {e}")
-                    
+
     return EventSourceResponse(sse_event_stream())

@@ -1,7 +1,6 @@
-import os
 import json
 import logging
-from typing import List, Dict
+import os
 
 logger = logging.getLogger("rag_api")
 
@@ -11,24 +10,24 @@ def get_system_prompt(style: str) -> str:
     if not os.path.exists(prompts_path):
         return default_prompt
     try:
-        with open(prompts_path, "r", encoding="utf-8") as f:
+        with open(prompts_path, encoding="utf-8") as f:
             data = json.load(f)
             return data.get(style, default_prompt)
     except Exception:
         return default_prompt
 
-def rewrite_query_with_history(query: str, chat_history: List[Dict], llm) -> str:
+def rewrite_query_with_history(query: str, chat_history: list[dict], llm) -> str:
     """
     Reformulates follow-up queries using chat history to make them search-friendly.
     """
     if not chat_history:
         return query
-        
+
     history_str = ""
     for msg in chat_history[-5:]:  # Analyze last 5 turns to stay fast
         role = "User" if msg["role"] == "user" else "Assistant"
         history_str += f"{role}: {msg['content']}\n"
-        
+
     prompt = f"""
     Given the following conversation history and a follow-up question, rewrite the follow-up question to be a standalone question that can be searched in a database.
     Do NOT answer the question. Just output the rewritten standalone question and nothing else.

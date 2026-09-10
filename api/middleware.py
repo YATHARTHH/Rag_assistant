@@ -1,11 +1,11 @@
+import json
+import logging
 import sys
 import time
 import uuid
-import json
-import logging
-from typing import Optional
+
 from fastapi import Request
-from fastapi.responses import Response, JSONResponse
+from fastapi.responses import JSONResponse
 from prometheus_client import Counter, Histogram
 from slowapi import Limiter
 from slowapi.util import get_remote_address
@@ -57,8 +57,8 @@ async def request_logger_middleware(request: Request, call_next):
         return response
     except Exception as e:
         logger.error(
-            f"Unhandled exception during request processing: {e}", 
-            exc_info=True, 
+            f"Unhandled exception during request processing: {e}",
+            exc_info=True,
             extra={"correlation_id": corr_id}
         )
         return JSONResponse(
