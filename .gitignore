@@ -5,3 +5,12 @@ __pycache__/
 .DS_Store
 users.db
 qdrant_db/
+
+# Test & CI Coverage Cache
+coverage.xml
+.coverage
+htmlcov/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+temp_uploads/
