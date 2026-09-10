@@ -10,12 +10,11 @@ from pydantic import BaseModel
 from qdrant_client.http import models
 from sse_starlette.sse import EventSourceResponse
 
+import database.sqlite as sqlite_db
 from api.auth import create_access_token, get_current_user
 from api.middleware import CACHE_COUNTER, LATENCY_HISTOGRAM, TOKEN_COUNTER, limiter, logger
 from database.qdrant import add_chunks_to_qdrant, delete_file_from_qdrant, get_qdrant_client
-
-# Import local modules
-from database.sqlite import USER_DB_PATH, create_user, verify_user
+from database.sqlite import create_user, verify_user
 from rag.chunking import parent_child_chunking
 from rag.embedding import make_embedder
 from rag.evaluation import (
@@ -147,7 +146,7 @@ def health_check():
         "sqlite": "healthy",
     }
     try:
-        conn = sqlite3.connect(USER_DB_PATH)
+        conn = sqlite3.connect(sqlite_db.USER_DB_PATH)
         conn.execute("SELECT 1")
         conn.close()
     except Exception:
@@ -184,11 +183,12 @@ def auth_signup(req: SignupRequest):
     "/auth/login", tags=["Auth"], summary="Authenticate credentials and return a signed JWT token."
 )
 def auth_login(req: LoginRequest):
+    sqlite_db.init_user_db()
     valid = verify_user(req.username, req.password)
     if not valid:
         raise HTTPException(status_code=401, detail="Invalid username or password.")
 
-    conn = sqlite3.connect(USER_DB_PATH)
+    conn = sqlite3.connect(sqlite_db.USER_DB_PATH)
     cursor = conn.cursor()
     cursor.execute("SELECT role FROM users WHERE username = ?", (req.username,))
     row = cursor.fetchone()
@@ -342,7 +342,7 @@ def get_db_stats(username: str = Depends(get_current_user)):
 )
 def get_token_usage_stats(username: str = Depends(get_current_user)):
     try:
-        conn = sqlite3.connect(USER_DB_PATH)
+        conn = sqlite3.connect(sqlite_db.USER_DB_PATH)
         cursor = conn.cursor()
         cursor.execute(
             "SELECT COUNT(*), SUM(prompt_tokens), SUM(completion_tokens), SUM(total_tokens) FROM token_usage WHERE username = ?",
@@ -409,7 +409,7 @@ def clear_user_db(username: str = Depends(get_current_user)):
 )
 def list_chat_sessions(username: str = Depends(get_current_user)):
     try:
-        conn = sqlite3.connect(USER_DB_PATH)
+        conn = sqlite3.connect(sqlite_db.USER_DB_PATH)
         cursor = conn.cursor()
         cursor.execute(
             "SELECT DISTINCT session_id, timestamp FROM chat_history WHERE username = ? ORDER BY timestamp DESC",
@@ -429,7 +429,7 @@ def list_chat_sessions(username: str = Depends(get_current_user)):
 )
 def get_chat_history(session_id: str, username: str = Depends(get_current_user)):
     try:
-        conn = sqlite3.connect(USER_DB_PATH)
+        conn = sqlite3.connect(sqlite_db.USER_DB_PATH)
         cursor = conn.cursor()
         cursor.execute(
             "SELECT role, content FROM chat_history WHERE username = ? AND session_id = ? ORDER BY id ASC",
@@ -449,7 +449,7 @@ def get_chat_history(session_id: str, username: str = Depends(get_current_user))
 )
 def post_chat_feedback(req: FeedbackRequest, username: str = Depends(get_current_user)):
     try:
-        conn = sqlite3.connect(USER_DB_PATH)
+        conn = sqlite3.connect(sqlite_db.USER_DB_PATH)
         cursor = conn.cursor()
         cursor.execute(
             "INSERT INTO feedback (username, message_id, rating, feedback_text) VALUES (?, ?, ?, ?)",
@@ -754,7 +754,7 @@ def chat_endpoint(request: Request, req: ChatRequest, username: str = Depends(ge
                     yield f"__EVAL_START__{json.dumps(eval_data)}__EVAL_END__"
 
                     session_id = str(uuid.uuid4().hex[:12])
-                    conn = sqlite3.connect(USER_DB_PATH)
+                    conn = sqlite3.connect(sqlite_db.USER_DB_PATH)
                     cursor = conn.cursor()
                     cursor.execute(
                         "INSERT INTO chat_history (username, session_id, role, content) VALUES (?, ?, ?, ?)",
@@ -773,7 +773,7 @@ def chat_endpoint(request: Request, req: ChatRequest, username: str = Depends(ge
                         total_tokens = prompt_tokens + completion_tokens
                         TOKEN_COUNTER.labels(type="prompt").inc(prompt_tokens)
                         TOKEN_COUNTER.labels(type="completion").inc(completion_tokens)
-                        conn_tok = sqlite3.connect(USER_DB_PATH)
+                        conn_tok = sqlite3.connect(sqlite_db.USER_DB_PATH)
                         cur_tok = conn_tok.cursor()
                         cur_tok.execute(
                             "INSERT INTO token_usage (username, query, prompt_tokens, completion_tokens, total_tokens) VALUES (?, ?, ?, ?, ?)",
